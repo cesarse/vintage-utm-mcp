@@ -1,2 +1,101 @@
 # vintage-utm-mcp
-An MCP server to use legacy operating system (like MS-DOS, OS/2 and Mac OS 9) running in UTM
+
+An MCP server for driving vintage operating systems (like MS-DOS, OS/2, Windows 3.x and classic Mac OS) running in [UTM](https://mac.getutm.app/) on macOS. Designed for guests that cannot run a guest agent: everything goes through utmctl (lifecycle) and QMP (in-guest interaction).
+
+## Requirements
+
+- macOS with UTM installed
+- `utmctl` on PATH (symlink from `/Applications/UTM.app/Contents/MacOS/utmctl`)
+- [uv](https://docs.astral.sh/uv/)
+
+## Install
+
+``` sh
+uv sync
+```
+
+## Run manually (debug)
+
+``` sh
+uv run vintage-utm-mcp          # stdio server
+uv run mcp dev src/vintage_utm_mcp/server.py   # browser inspector
+```
+
+## Register in Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+``` json
+{
+  "mcpServers": {
+    "vintage-utm": {
+      "command": "/Users/YOUR_USER/.local/bin/uv",
+      "args": ["run", "--directory", "/path/to/vintage-utm-mcp", "vintage-utm-mcp"]
+    }
+  }
+}
+```
+
+> Use the **absolute** path to `uv` (a curl install lives in `~/.local/bin/uv`): apps launched by launchd do not inherit your shell's PATH. Confirm with `which uv`.
+
+On first use, macOS will ask for an **Automation** permission (Claude → UTM). Accept it.
+
+## QMP setup (once per VM)
+
+In-guest tools (media, input, screenshots) talk QMP. For each VM, add this to VM settings → QEMU → Arguments, then restart the VM:
+
+```         
+-qmp tcp:127.0.0.1:<port>,server,nowait
+```
+
+The `check_vm` tool prints the exact string, port included (ports are deterministic per VM name). Keep `127.0.0.1`: QMP has no authentication, and the short form `tcp::port` would listen on every network interface. Loopback TCP is used instead of a unix socket because UTM's sandbox denies binding sockets outside its container.
+
+Per-VM overrides (e.g. after renaming a VM) go in `~/.vintage-utm-mcp/qmp.toml`:
+
+``` toml
+[vms]
+"MS-DOS 6.22" = "tcp:127.0.0.1:4501"
+```
+
+## Media library
+
+UTM's sandbox can only read files inside its own container (plus files granted through its UI), so floppy/CD images for `insert_media` live in a library folder the server creates on demand:
+
+```         
+~/Library/Containers/com.utmapp.UTM/Data/Documents/vintage-utm-mcp/
+```
+
+Copy images there and pass just the filename to `insert_media` (absolute paths are accepted but will usually be rejected by the sandbox outside that container). Drive identifiers look like `drive<UUID>` — that is how UTM names QEMU drives; use them exactly as returned by `list_drives`.
+
+## Tools
+
+| Tool | Description |
+|------------------------------------|------------------------------------|
+| `list_vms` | List VMs with name, UUID and status |
+| `start_vm(vm, disposable=false)` | Start (or resume); `disposable` runs as a snapshot without saving changes |
+| `stop_vm(vm, mode=force\|request\|kill)` | Stop the VM |
+| `suspend_vm(vm, save_state=false)` | Suspend to memory |
+| `check_vm(vm)` | Existence, status and QMP diagnostics (with setup hint) |
+| `list_drives(vm)` | Block devices, removable first |
+| `insert_media(vm, drive, image_path, image_format=raw)` | Insert an image while running |
+| `eject_media(vm, drive, force=false)` | Eject; `force` for guests that lock media (classic Mac OS) |
+
+## Notes
+
+- `utmctl` does not work over SSH or before login (macOS AppleEvents limitation).
+- `stop_vm` defaults to `force` (power-button semantics): DOS-era guests do not answer ACPI requests. Stop at an idle `C:\>` prompt and mind SMARTDRV's write-behind cache.
+- QEMU accepts a single QMP client per endpoint; the server keeps one persistent connection per VM and reconnects after VM restarts.
+
+## Roadmap
+
+1.  ~~Lifecycle (utmctl)~~
+2.  ~~QMP module + `check_vm`~~
+3.  ~~Removable media: `list_drives`, `insert_media`, `eject_media`~~
+4.  Input: `type_text`, `send_keys`, `mouse_click`, `mouse_drag`
+5.  Output: `screenshot` (2× upscale), `read_text_screen` (B8000 text-mode video memory)
+
+## Tests
+
+``` sh
+uv run pytest
+```
