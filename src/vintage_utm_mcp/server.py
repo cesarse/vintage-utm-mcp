@@ -6,6 +6,7 @@ Next increments: removable media, keyboard/mouse, screenshot, text-mode
 screen reading.
 """
 
+import asyncio
 import shutil
 import subprocess
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from vintage_utm_mcp import qmp, utmctl
+from vintage_utm_mcp import keyboard, qmp, utmctl
 
 mcp = FastMCP("vintage-utm")
 
@@ -283,6 +284,64 @@ async def eject_media(vm: str, drive: str, force: bool = False) -> dict[str, Any
     canonical = _canonical(vm, entry)
     await _blockdev(canonical, "eject", drive, {"force": force})
     return await _drive_state(canonical, drive)
+
+
+@mcp.tool()
+async def type_text(
+    vm: str, text: str, delay_ms: int = 60, layout: str = "us"
+) -> dict[str, Any]:
+    """Type text into the VM as raw keystrokes (works in DOS, BIOS, GUIs).
+
+    Args:
+        vm: VM name or UUID.
+        text: text to type; "\\n" presses Enter. Injected as US-layout
+            keystrokes: keep the guest on its default US mapping (in DOS,
+            don't load KEYB) or punctuation will come out wrong.
+        delay_ms: pause between characters. The default 60 is safe for
+            DOS-era guests, which drop keys during disk I/O if flooded;
+            raise it if characters go missing, lower it for bulk typing.
+        layout: only "us" for now.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    chords = keyboard.text_to_chords(text, layout=layout)
+    hold = max(10, delay_ms // 2)
+    for chord in chords:
+        await _qmp.execute(
+            canonical,
+            "send-key",
+            {
+                "keys": [{"type": "qcode", "data": key} for key in chord],
+                "hold-time": hold,
+            },
+        )
+        await asyncio.sleep(delay_ms / 1000)
+    return {"typed_chars": len(chords)}
+
+
+@mcp.tool()
+async def send_keys(vm: str, combo: str, hold_ms: int = 100) -> dict[str, Any]:
+    """Press a key combination (all keys held together, then released).
+
+    Args:
+        vm: VM name or UUID.
+        combo: keys separated by '-', '+' or spaces: "ctrl-alt-delete",
+            "alt-f4", "F8", "enter", "shift+tab". For the minus/plus keys
+            themselves use "minus" and "equal".
+        hold_ms: how long the chord is held before release.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    keys = keyboard.parse_combo(combo)
+    await _qmp.execute(
+        canonical,
+        "send-key",
+        {
+            "keys": [{"type": "qcode", "data": key} for key in keys],
+            "hold-time": hold_ms,
+        },
+    )
+    return {"pressed": keys}
 
 
 def main() -> None:
