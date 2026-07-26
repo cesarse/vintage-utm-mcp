@@ -132,7 +132,10 @@ returned by `list_drives`.
 5. Output: `screenshot` (2× upscale), `read_text_screen` (B8000 text-mode
    video memory)
 6. Mouse: `mouse_click`, `mouse_drag`
-7. Known debt: media library provenance manifest (name-collision handling
+7. `detect_layout` calibration probe: type ambiguous characters, read
+   them back from the screen, deduce the guest's active mapping
+   (depends on 5)
+8. Known debt: media library provenance manifest (name-collision handling
    currently relies on file size, which is blind to fixed-size floppies)
 
 ## Tests

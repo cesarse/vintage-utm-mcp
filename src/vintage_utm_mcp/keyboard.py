@@ -50,6 +50,7 @@ VALID_QCODES = frozenset(
     list("abcdefghijklmnopqrstuvwxyz")
     + list("0123456789")
     + [f"f{n}" for n in range(1, 13)]
+    + ["meta_l", "meta_r"]
     + [
         "esc", "ret", "tab", "backspace", "spc",
         "minus", "equal", "bracket_left", "bracket_right", "backslash",
@@ -90,6 +91,11 @@ KEY_ALIASES = {
     "lalt": "alt",
     "ralt": "alt_r",
     "altgr": "alt_r",
+    # Mac guests (e.g. Mac OS 9): QEMU maps these qcodes to ADB modifiers.
+    "cmd": "meta_l",
+    "command": "meta_l",
+    "meta": "meta_l",
+    "option": "alt",
 }
 
 

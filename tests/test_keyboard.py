@@ -57,3 +57,8 @@ def test_parse_combo_separators_and_aliases() -> None:
 def test_parse_combo_unknown_key() -> None:
     with pytest.raises(KeyboardError, match="'hyperspace'"):
         parse_combo("ctrl-hyperspace")
+
+
+def test_mac_modifier_aliases() -> None:
+    assert parse_combo("cmd-q") == ["meta_l", "q"]
+    assert parse_combo("option-esc") == ["alt", "esc"]
