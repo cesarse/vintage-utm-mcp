@@ -94,3 +94,28 @@ def test_ppm_to_png_leaves_large_screens_alone() -> None:
 def test_ppm_to_png_explicit_scale() -> None:
     _, w, h, scale = ppm_to_png(_ppm(100, 50), scale=3)
     assert (w, h, scale) == (300, 150, 3)
+
+
+def test_locate_text_first_and_nth_occurrence() -> None:
+    from vintage_utm_mcp.screen import locate_text
+
+    screen_text = "  File  Edit  Search\n\nOpen File...  Save File As"
+    assert locate_text(screen_text, "File") == (0, 4)  # center of "File"
+    assert locate_text(screen_text, "File", occurrence=2) == (2, 7)
+    assert locate_text(screen_text, "File", occurrence=3) == (2, 21)
+
+
+def test_locate_text_not_found() -> None:
+    from vintage_utm_mcp.screen import locate_text
+
+    with pytest.raises(ScreenError, match="'Quit'"):
+        locate_text("File  Edit", "Quit")
+
+
+def test_cell_center_px_mode3_geometry() -> None:
+    from vintage_utm_mcp.screen import cell_center_px
+
+    # Mode 3: 720x400 framebuffer, 80x25 cells of 9x16.
+    assert cell_center_px(0, 0, 80, 25, 720, 400) == (4, 8)  # round(4.5) -> 4, banker's rounding
+    assert cell_center_px(24, 79, 80, 25, 720, 400) == (716, 392)
+    assert cell_center_px(12, 40, 80, 25, 720, 400) == (364, 200)

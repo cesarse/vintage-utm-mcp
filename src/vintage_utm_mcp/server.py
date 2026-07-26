@@ -16,7 +16,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Image as McpImage
 
-from vintage_utm_mcp import keyboard, qmp, screen, utmctl
+from vintage_utm_mcp import keyboard, mouse, qmp, screen, utmctl
 
 mcp = FastMCP("vintage-utm")
 
@@ -120,11 +120,26 @@ async def check_vm(vm: str) -> dict[str, Any]:
         )
         return result
     q = version["qemu"]
+    mice = await _qmp.execute(canonical, "query-mice")
     result.update(
         qmp_reachable=True,
         qemu_version=f"{q['major']}.{q['minor']}.{q['micro']}",
         guest_runstate=runstate.get("status"),
+        pointer_devices=[
+            {"name": m.get("name"), "current": m.get("current"),
+             "absolute": m.get("absolute")}
+            for m in mice
+        ],
     )
+    if any(m.get("absolute") for m in mice):
+        result["pointer_hint"] = (
+            "An absolute pointer (USB tablet) is present; QEMU routes "
+            "un-addressed input to the 'current' pointer, which DOS-era "
+            "guests can't see when it's the tablet. The mouse tools now "
+            "switch to a relative pointer automatically before each "
+            "gesture (mouse_set); removing the USB/tablet pointer from "
+            "this VM's UTM configuration remains the permanent fix."
+        )
     return result
 
 
@@ -443,6 +458,200 @@ async def read_text_screen(vm: str) -> dict[str, Any]:
         "columns": bda["columns"],
         "rows": bda["rows"],
         "mode": bda["mode"],
+    }
+
+
+async def _send_input(vm: str, events: list[dict]) -> None:
+    await _qmp.execute(vm, "input-send-event", {"events": events})
+
+
+def _rel(dx: int, dy: int) -> list[dict]:
+    events = []
+    if dx:
+        events.append({"type": "rel", "data": {"axis": "x", "value": dx}})
+    if dy:
+        events.append({"type": "rel", "data": {"axis": "y", "value": dy}})
+    return events
+
+
+def _btn(button: str, down: bool) -> list[dict]:
+    return [{"type": "btn", "data": {"button": button, "down": down}}]
+
+
+@mcp.tool()
+async def mouse_click(
+    vm: str, x: int, y: int, button: str = "left", double: bool = False
+) -> dict[str, Any]:
+    """Click at (x, y) in the LAST screenshot's pixel space.
+
+    Take a screenshot first and aim on it; coordinates are automatically
+    mapped back to guest pixels (screenshots are usually 2x upscaled).
+    The pointer is re-anchored at the top-left corner before every click,
+    so driver drift never accumulates. If clicks land offset (DOS's
+    default driver halves vertical motion), set per-VM factors in the
+    [mouse] table of ~/.vintage-utm-mcp/qmp.toml (y = 2.0 is the usual
+    DOS fix) — verify with a follow-up screenshot. On text-mode screens,
+    prefer mouse_click_text_screen.
+
+    Args:
+        vm: VM name or UUID.
+        x, y: target in last-screenshot pixels.
+        button: "left", "right" or "middle".
+        double: double-click.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    mouse.validate_button(button)
+    gx, gy = await _mouse_goto(canonical, x, y)
+    await _click(canonical, button, double)
+    return {
+        "guest_coords": [gx, gy],
+        "button": button,
+        "double": double,
+        "calibration": list(mouse.read_calibration(canonical)),
+        "coordinate_space": (
+            f"last screenshot (scale {_LAST_SCREEN[canonical]['scale']}x)"
+            if canonical in _LAST_SCREEN
+            else "guest-native (no screenshot cached since server start)"
+        ),
+    }
+
+
+@mcp.tool()
+async def mouse_drag(
+    vm: str, x1: int, y1: int, x2: int, y2: int, button: str = "left"
+) -> dict[str, Any]:
+    """Drag from (x1, y1) to (x2, y2) in the LAST screenshot's pixel space.
+
+    Presses at the start point, walks to the end point in small paced
+    steps (old GUIs need to sample the motion — instant jumps break drag
+    detection), and releases. Calibration errors offset the DROP point,
+    so verify with a screenshot; see mouse_click for the calibration file.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    mouse.validate_button(button)
+    gx1, gy1 = await _mouse_goto(canonical, x1, y1)
+    gx2, gy2 = mouse.image_to_guest(x2, y2, _LAST_SCREEN.get(canonical))
+    calibration = mouse.read_calibration(canonical)
+    dx, dy = mouse.apply_calibration(gx2 - gx1, gy2 - gy1, calibration)
+    await _send_input(canonical, _btn(button, True))
+    try:
+        await asyncio.sleep(0.15)  # let the guest recognize the grab
+        for sx, sy in mouse.plan_moves(dx, dy):
+            await _send_input(canonical, _rel(sx, sy))
+            await asyncio.sleep(0.018)
+        await asyncio.sleep(0.15)  # settle before dropping
+    finally:
+        await _send_input(canonical, _btn(button, False))
+    return {
+        "guest_from": [gx1, gy1],
+        "guest_to": [gx2, gy2],
+        "button": button,
+        "calibration": list(calibration),
+    }
+
+
+async def _ensure_relative_pointer(vm: str) -> None:
+    """Route QEMU input to a relative pointer when an absolute tablet is
+    hogging it — retro guests have no tablet driver and lose our events."""
+    mice = await _qmp.execute(vm, "query-mice")
+    index = mouse.pick_relative_mouse(mice)
+    if index is not None:
+        await _qmp.execute(
+            vm, "human-monitor-command", {"command-line": f"mouse_set {index}"}
+        )
+
+
+async def _mouse_goto_guest(vm: str, gx: int, gy: int) -> None:
+    """Anchor at the top-left corner, then dead-reckon to guest (gx, gy)."""
+    await _ensure_relative_pointer(vm)
+    calibration = mouse.read_calibration(vm)
+    for _ in range(3):  # corner reset; the screen edge clamps the overshoot
+        await _send_input(vm, _rel(-5000, -5000))
+        await asyncio.sleep(0.02)
+    dx, dy = mouse.apply_calibration(gx, gy, calibration)
+    for sx, sy in mouse.plan_moves(dx, dy):
+        await _send_input(vm, _rel(sx, sy))
+        await asyncio.sleep(0.012)
+
+
+async def _mouse_goto(vm: str, x: int, y: int) -> tuple[int, int]:
+    """Goto for image-space coordinates (last screenshot's pixel space)."""
+    gx, gy = mouse.image_to_guest(x, y, _LAST_SCREEN.get(vm))
+    await _mouse_goto_guest(vm, gx, gy)
+    return gx, gy
+
+
+async def _click(vm: str, button: str, double: bool) -> None:
+    for i in range(2 if double else 1):
+        if i:
+            await asyncio.sleep(0.09)  # well inside retro double-click time
+        await _send_input(vm, _btn(button, True))
+        await asyncio.sleep(0.06)
+        await _send_input(vm, _btn(button, False))
+
+
+@mcp.tool()
+async def mouse_click_text_screen(
+    vm: str,
+    text: str,
+    occurrence: int = 1,
+    button: str = "left",
+    double: bool = False,
+) -> dict[str, Any]:
+    """Click ON a string visible on an x86 text-mode screen (DOS, OS/2
+    console) — no coordinates, no vision: the screen text is read from
+    video memory, the string is located, and its cell center is clicked.
+
+    Removes all aiming error; per-VM mouse calibration still applies to
+    the pointer walk, and the guest still needs its mouse driver loaded
+    (in DOS: MOUSE.COM). For graphics modes/GUIs use mouse_click.
+
+    Args:
+        vm: VM name or UUID.
+        text: exact string to click (e.g. "File"); case-sensitive.
+        occurrence: which match, in reading order (1 = first).
+        button: "left", "right" or "middle".
+        double: double-click.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    mouse.validate_button(button)
+    target = await _qmp.execute(canonical, "query-target")
+    if target.get("arch") not in ("i386", "x86_64"):
+        raise ValueError("mouse_click_text_screen is x86 text-mode only; use mouse_click")
+    bda_raw = await _dump_to_bytes(
+        canonical, "pmemsave", {"val": 0x400, "size": 0x100}, ".bin"
+    )
+    bda = screen.parse_bda(bda_raw)
+    if bda["mode"] not in screen.TEXT_MODES:
+        raise ValueError(
+            f"guest is in graphics mode 0x{bda['mode']:02X}; use mouse_click"
+        )
+    buffer = await _dump_to_bytes(
+        canonical,
+        "pmemsave",
+        {"val": screen.text_buffer_address(bda),
+         "size": bda["columns"] * bda["rows"] * 2},
+        ".bin",
+    )
+    screen_text = screen.decode_text_buffer(buffer, bda["columns"], bda["rows"])
+    row, col = screen.locate_text(screen_text, text, occurrence)
+    width, height = screen.ppm_size(
+        await _dump_to_bytes(canonical, "screendump", {}, ".ppm")
+    )
+    gx, gy = screen.cell_center_px(
+        row, col, bda["columns"], bda["rows"], width, height
+    )
+    await _mouse_goto_guest(canonical, gx, gy)
+    await _click(canonical, button, double)
+    return {
+        "clicked_text": text,
+        "row": row,
+        "column": col,
+        "guest_coords": [gx, gy],
+        "calibration": list(mouse.read_calibration(canonical)),
     }
 
 

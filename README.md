@@ -114,6 +114,9 @@ returned by `list_drives`.
 | `send_keys(vm, combo, hold_ms=100)` | Press a chord: "ctrl-alt-delete", "F8", "enter" |
 | `screenshot(vm, delay_ms=0, scale=0)` | PNG of the guest framebuffer; retro resolutions auto-upscaled 2× |
 | `read_text_screen(vm)` | Exact characters of an x86 text-mode screen, read from video memory |
+| `mouse_click(vm, x, y, button=left, double=false)` | Click at last-screenshot coordinates (corner-reset dead reckoning) |
+| `mouse_drag(vm, x1, y1, x2, y2, button=left)` | Drag with paced steps (old GUIs need to sample the motion) |
+| `mouse_click_text_screen(vm, text, occurrence=1, ...)` | Click ON a string of a text-mode screen: located in video memory, zero aiming error |
 
 ## Notes
 
@@ -133,7 +136,8 @@ returned by `list_drives`.
 4. ~~Input, keyboard: `type_text`, `send_keys` (mouse pending)~~
 5. ~~Output: `screenshot` (2× upscale), `read_text_screen` (video memory
    via BIOS Data Area: mode/columns/rows/page-aware, color and mono)~~
-6. Mouse: `mouse_click`, `mouse_drag`
+6. ~~Mouse: `mouse_click`, `mouse_drag` (relative pointer + per-VM
+   calibration in the `[mouse]` config table; DOS usually needs y = 2.0)~~
 7. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)

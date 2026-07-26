@@ -80,6 +80,45 @@ def decode_text_buffer(raw: bytes, columns: int, rows: int) -> str:
     return "\n".join(lines)
 
 
+def locate_text(
+    screen_text: str, needle: str, occurrence: int = 1
+) -> tuple[int, int]:
+    """Find the Nth occurrence of `needle` on the screen, reading order.
+
+    Returns (row, column-of-center), both zero-based. Raises ScreenError
+    when absent or when fewer occurrences exist.
+    """
+    if not needle:
+        raise ScreenError("cannot locate empty text")
+    remaining = occurrence
+    for row, line in enumerate(screen_text.split("\n")):
+        start = 0
+        while (idx := line.find(needle, start)) != -1:
+            remaining -= 1
+            if remaining == 0:
+                return row, idx + len(needle) // 2
+            start = idx + 1
+    raise ScreenError(
+        f"text {needle!r} not found on screen"
+        + (f" ({occurrence} occurrences requested)" if occurrence > 1 else "")
+    )
+
+
+def cell_center_px(
+    row: int, column: int, columns: int, rows: int, width: int, height: int
+) -> tuple[int, int]:
+    """Pixel center of a character cell, given screen geometry."""
+    cell_w = width / columns
+    cell_h = height / rows
+    return round((column + 0.5) * cell_w), round((row + 0.5) * cell_h)
+
+
+def ppm_size(ppm: bytes) -> tuple[int, int]:
+    """Width and height of a PPM image without full decoding."""
+    image = PILImage.open(io.BytesIO(ppm))
+    return image.size
+
+
 def ppm_to_png(ppm: bytes, scale: int = 0) -> tuple[bytes, int, int, int]:
     """Convert a PPM screendump to PNG, upscaling with nearest-neighbor.
 
