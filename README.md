@@ -1,9 +1,6 @@
 # vintage-utm-mcp
 
-An MCP server for handle vintage operating systems (like MS-DOS, OS/2,
-Windows 3.x and classic Mac OS) running in [UTM](https://mac.getutm.app/)
-on macOS. Designed for guests that cannot run a guest agent: everything
-goes through utmctl (lifecycle) and QMP (in-guest interaction).
+An MCP server for handling vintage operating systems (like MS-DOS, OS/2, Windows 3.x and classic Mac OS) running in [UTM](https://mac.getutm.app/) on macOS. Designed for guests that cannot run a guest agent: everything goes through utmctl (lifecycle) and QMP (in-guest interaction).
 
 ## Requirements
 
@@ -13,13 +10,13 @@ goes through utmctl (lifecycle) and QMP (in-guest interaction).
 
 ## Install
 
-```sh
+``` sh
 uv sync
 ```
 
 ## Run manually (debug)
 
-```sh
+``` sh
 uv run vintage-utm-mcp          # stdio server
 uv run mcp dev src/vintage_utm_mcp/server.py   # browser inspector
 ```
@@ -28,7 +25,7 @@ uv run mcp dev src/vintage_utm_mcp/server.py   # browser inspector
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
-```json
+``` json
 {
   "mcpServers": {
     "vintage-utm": {
@@ -39,58 +36,41 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-> Use the **absolute** path to `uv` (a curl install lives in
-> `~/.local/bin/uv`): apps launched by launchd do not inherit your
-> shell's PATH. Confirm with `which uv`.
+> Use the **absolute** path to `uv` (a curl install lives in `~/.local/bin/uv`): apps launched by launchd do not inherit your shell's PATH. Confirm with `which uv`.
 
-On first use, macOS will ask for an **Automation** permission
-(Claude → UTM). Accept it.
+On first use, macOS will ask for an **Automation** permission (Claude → UTM). Accept it.
 
 ## QMP setup (once per VM)
 
-In-guest tools (media, input, screenshots) talk QMP. For each VM, add
-this to VM settings → QEMU → Arguments, then restart the VM:
+In-guest tools (media, input, screenshots) talk QMP. For each VM, add this to VM settings → QEMU → Arguments, then restart the VM:
 
-```
+```         
 -qmp tcp:127.0.0.1:<port>,server,nowait
 ```
 
-The `check_vm` tool prints the exact string, port included (ports are
-deterministic per VM name). Keep `127.0.0.1`: QMP has no
-authentication, and the short form `tcp::port` would listen on every
-network interface. Loopback TCP is used instead of a unix socket
-because UTM's sandbox denies binding sockets outside its container.
+The `check_vm` tool prints the exact string, port included (ports are deterministic per VM name). Keep `127.0.0.1`: QMP has no authentication, and the short form `tcp::port` would listen on every network interface. Loopback TCP is used instead of a unix socket because UTM's sandbox denies binding sockets outside its container.
 
 Per-VM overrides (e.g. after renaming a VM) go in `~/.vintage-utm-mcp/qmp.toml`:
 
-```toml
+``` toml
 [vms]
 "MS-DOS 6.22" = "tcp:127.0.0.1:4501"
 ```
 
 ## Media library
 
-QEMU runs inside the QEMUHelper XPC service, which has its own App
-Sandbox separate from UTM's: files UTM knows about are granted one by
-one via security-scoped bookmarks, and any other path fails with
-"Operation not permitted" — even inside UTM's own container. The one
-location QEMU can always read is the helper's container, so that is
-where the media library lives (created on demand by the server):
+QEMU runs inside the QEMUHelper XPC service, which has its own App Sandbox separate from UTM's: files UTM knows about are granted one by one via security-scoped bookmarks, and any other path fails with "Operation not permitted" — even inside UTM's own container. The one location QEMU can always read is the helper's container, so that is where the media library lives (created on demand by the server):
 
-```
+```         
 ~/Library/Containers/com.utmapp.QEMUHelper/Data/Documents/vintage-utm-mcp/
 ```
 
-Copy images there and pass just the filename to `insert_media`
-(absolute paths are accepted but will usually be rejected by the
-sandbox outside that container). Drive identifiers look like
-`drive<UUID>` — that is how UTM names QEMU drives; use them exactly as
-returned by `list_drives`.
+You never need to copy anything there manually: `insert_media` accepts any host path (e.g. `~/Downloads/Disk4.img`) and stages it into the library automatically — an instant copy-on-write APFS clone. Guest writes go to the staged copy, not your original. Bare filenames resolve against the library directly. Drive identifiers look like `drive<UUID>` — that is how UTM names QEMU drives; use them exactly as returned by `list_drives`.
 
 ## Tools
 
 | Tool | Description |
-|---|---|
+|------------------------------------|------------------------------------|
 | `list_vms` | List VMs with name, UUID and status |
 | `start_vm(vm, disposable=false)` | Start (or resume); `disposable` runs as a snapshot without saving changes |
 | `stop_vm(vm, mode=force\|request\|kill)` | Stop the VM |
@@ -102,25 +82,20 @@ returned by `list_drives`.
 
 ## Notes
 
-- `utmctl` does not work over SSH or before login (macOS AppleEvents
-  limitation).
-- `stop_vm` defaults to `force` (power-button semantics): DOS-era
-  guests do not answer ACPI requests. Stop at an idle `C:\>` prompt and
-  mind SMARTDRV's write-behind cache.
-- QEMU accepts a single QMP client per endpoint; the server keeps one
-  persistent connection per VM and reconnects after VM restarts.
+- `utmctl` does not work over SSH or before login (macOS AppleEvents limitation).
+- `stop_vm` defaults to `force` (power-button semantics): DOS-era guests do not answer ACPI requests. Stop at an idle `C:\>` prompt and mind SMARTDRV's write-behind cache.
+- QEMU accepts a single QMP client per endpoint; the server keeps one persistent connection per VM and reconnects after VM restarts.
 
 ## Roadmap
 
-1. ~~Lifecycle (utmctl)~~
-2. ~~QMP module + `check_vm`~~
-3. ~~Removable media: `list_drives`, `insert_media`, `eject_media`~~
-4. Input: `type_text`, `send_keys`, `mouse_click`, `mouse_drag`
-5. Output: `screenshot` (2× upscale), `read_text_screen` (B8000 text-mode
-   video memory)
+1.  ~~Lifecycle (utmctl)~~
+2.  ~~QMP module + `check_vm`~~
+3.  ~~Removable media: `list_drives`, `insert_media`, `eject_media`~~
+4.  Input: `type_text`, `send_keys`, `mouse_click`, `mouse_drag`
+5.  Output: `screenshot` (2× upscale), `read_text_screen` (B8000 text-mode video memory)
 
 ## Tests
 
-```sh
+``` sh
 uv run pytest
 ```

@@ -6,6 +6,8 @@ Next increments: removable media, keyboard/mouse, screenshot, text-mode
 screen reading.
 """
 
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +162,34 @@ def _resolve_image(image_path: str) -> Path:
     raise ValueError("image not found on host; searched: " + ", ".join(searched))
 
 
+def _stage_into_library(path: Path) -> Path:
+    """Stage an image into the library so QEMU's sandbox can read it.
+
+    Uses an APFS copy-on-write clone (cp -c) when available — instant and
+    storage-free — falling back to a regular copy elsewhere.
+    """
+    library = media_library()
+    if library is None:
+        raise ValueError(
+            "QEMUHelper container not found; start any QEMU VM once in UTM "
+            "so macOS creates it, then retry"
+        )
+    target = library / path.name
+    if target.exists():
+        if target.stat().st_size == path.stat().st_size:
+            return target  # same name and size: assume it's the same image
+        raise ValueError(
+            f"a different image named {path.name!r} already exists in the "
+            f"library ({target}); rename one of them"
+        )
+    clone = subprocess.run(
+        ["cp", "-c", str(path), str(target)], capture_output=True
+    )
+    if clone.returncode != 0:  # non-APFS volume or non-macOS: plain copy
+        shutil.copy2(path, target)
+    return target
+
+
 async def _blockdev(vm: str, cmd: str, drive: str, extra: dict) -> Any:
     """Run a block command trying the legacy 'device' key, then 'id'."""
     try:
@@ -201,17 +231,20 @@ async def insert_media(
         vm: VM name or UUID.
         drive: drive identifier from list_drives (UTM names them like
             "drive<UUID>").
-        image_path: a bare filename is resolved against the media library
-            (a "vintage-utm-mcp" folder inside UTM's container Documents,
-            the one place UTM's sandbox can always read); an absolute path
-            is used as-is, but the sandbox will reject most locations
-            outside UTM's container.
+        image_path: any host path (e.g. ~/Downloads/Disk4.img), or a bare
+            filename already in the media library. Images outside the
+            library are staged into it automatically (instant APFS clone),
+            because QEMU's sandbox can only read the library. Note: guest
+            writes go to the staged copy, not the original file.
         image_format: QEMU image format; "raw" (default) covers .img/.ima
             floppies and .iso images.
     """
     entry = _find_vm(vm)
     canonical = _canonical(vm, entry)
     path = _resolve_image(image_path)
+    library = media_library()
+    if library is None or library not in path.parents:
+        path = _stage_into_library(path)
     try:
         await _blockdev(
             canonical,
