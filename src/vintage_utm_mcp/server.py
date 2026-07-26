@@ -123,16 +123,21 @@ async def check_vm(vm: str) -> dict[str, Any]:
     return result
 
 
-# UTM's sandbox can read files inside its own container (that's where the
-# VMs live), so a folder there is the reliable place for media images.
-UTM_DOCUMENTS = Path.home() / "Library/Containers/com.utmapp.UTM/Data/Documents"
+# QEMU runs inside the QEMUHelper XPC service, which has its OWN App
+# Sandbox, separate from UTM's. Files UTM knows about are blessed one by
+# one via security-scoped bookmarks; the only location QEMU can read
+# unconditionally is the helper's own container.
+HELPER_DOCUMENTS = (
+    Path.home() / "Library/Containers/com.utmapp.QEMUHelper/Data/Documents"
+)
 
 
 def media_library() -> Path | None:
-    """Folder inside UTM's container used as the media image library."""
-    if not UTM_DOCUMENTS.is_dir():
-        return None
-    library = UTM_DOCUMENTS / "vintage-utm-mcp"
+    """Folder inside QEMUHelper's container used as the media image library."""
+    if not HELPER_DOCUMENTS.parent.is_dir():
+        return None  # helper container does not exist (no QEMU VM ever ran)
+    HELPER_DOCUMENTS.mkdir(exist_ok=True)
+    library = HELPER_DOCUMENTS / "vintage-utm-mcp"
     try:
         library.mkdir(exist_ok=True)
     except OSError:
