@@ -9,12 +9,14 @@ screen reading.
 import asyncio
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Image as McpImage
 
-from vintage_utm_mcp import keyboard, qmp, utmctl
+from vintage_utm_mcp import keyboard, qmp, screen, utmctl
 
 mcp = FastMCP("vintage-utm")
 
@@ -342,6 +344,106 @@ async def send_keys(vm: str, combo: str, hold_ms: int = 100) -> dict[str, Any]:
         },
     )
     return {"pressed": keys}
+
+
+def _exchange_path(suffix: str) -> Path:
+    """A unique path QEMU can WRITE to (its own container): the reverse of
+    the media-library trick. The server reads the file and deletes it."""
+    library = media_library()
+    if library is None:
+        raise ValueError(
+            "QEMUHelper container not found; start any QEMU VM once in UTM "
+            "so macOS creates it, then retry"
+        )
+    exchange = library / ".qemu-out"
+    exchange.mkdir(exist_ok=True)
+    return exchange / f"{uuid.uuid4().hex}{suffix}"
+
+
+async def _dump_to_bytes(vm: str, cmd: str, args: dict, suffix: str) -> bytes:
+    path = _exchange_path(suffix)
+    try:
+        await _qmp.execute(vm, cmd, {**args, "filename": str(path)})
+        return path.read_bytes()
+    finally:
+        path.unlink(missing_ok=True)
+
+
+# Last known screen geometry per VM, fed by screenshot(); the mouse tools
+# will need it to map image coordinates back to guest coordinates.
+_LAST_SCREEN: dict[str, dict[str, int]] = {}
+
+
+@mcp.tool()
+async def screenshot(vm: str, delay_ms: int = 0, scale: int = 0) -> McpImage:
+    """Capture the VM's screen as a PNG image.
+
+    Captures the guest framebuffer at native resolution (host display
+    scaling never affects it). Small retro resolutions (width < 800) are
+    upscaled 2x with nearest-neighbor for readability — so the image you
+    see may be 2x the guest's real coordinate space.
+
+    Args:
+        vm: VM name or UUID.
+        delay_ms: wait before capturing (let the screen settle after
+            typing or a slow redraw).
+        scale: 0 = auto (2x when width < 800), or an explicit factor.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    if delay_ms:
+        await asyncio.sleep(delay_ms / 1000)
+    ppm = await _dump_to_bytes(canonical, "screendump", {}, ".ppm")
+    png, width, height, used_scale = screen.ppm_to_png(ppm, scale)
+    _LAST_SCREEN[canonical] = {
+        "width": width,
+        "height": height,
+        "scale": used_scale,
+    }
+    return McpImage(data=png, format="png")
+
+
+@mcp.tool()
+async def read_text_screen(vm: str) -> dict[str, Any]:
+    """Read the exact characters on an x86 text-mode screen (DOS, OS/2
+    console) straight from video memory — deterministic, no vision needed.
+
+    Detects the current video state from the BIOS Data Area (mode,
+    columns, rows, active page). Fails with guidance when the guest is in
+    a graphics mode or is not x86 (use screenshot there).
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    target = await _qmp.execute(canonical, "query-target")
+    arch = target.get("arch", "unknown")
+    if arch not in ("i386", "x86_64"):
+        raise ValueError(
+            f"text-screen reading is x86-only and this VM is {arch!r}; "
+            "use screenshot instead"
+        )
+    bda_raw = await _dump_to_bytes(
+        canonical, "pmemsave", {"val": 0x400, "size": 0x100}, ".bin"
+    )
+    bda = screen.parse_bda(bda_raw)
+    if bda["mode"] not in screen.TEXT_MODES:
+        raise ValueError(
+            f"guest is in graphics mode 0x{bda['mode']:02X}; "
+            "use screenshot instead"
+        )
+    size = bda["columns"] * bda["rows"] * 2
+    buffer = await _dump_to_bytes(
+        canonical,
+        "pmemsave",
+        {"val": screen.text_buffer_address(bda), "size": size},
+        ".bin",
+    )
+    text = screen.decode_text_buffer(buffer, bda["columns"], bda["rows"])
+    return {
+        "text": text,
+        "columns": bda["columns"],
+        "rows": bda["rows"],
+        "mode": bda["mode"],
+    }
 
 
 def main() -> None:

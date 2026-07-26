@@ -112,6 +112,8 @@ returned by `list_drives`.
 | `eject_media(vm, drive, force=false)` | Eject; `force` for guests that lock media (classic Mac OS) |
 | `type_text(vm, text, delay_ms=60, layout=us)` | Type text as raw keystrokes (US layout) |
 | `send_keys(vm, combo, hold_ms=100)` | Press a chord: "ctrl-alt-delete", "F8", "enter" |
+| `screenshot(vm, delay_ms=0, scale=0)` | PNG of the guest framebuffer; retro resolutions auto-upscaled 2× |
+| `read_text_screen(vm)` | Exact characters of an x86 text-mode screen, read from video memory |
 
 ## Notes
 
@@ -129,8 +131,8 @@ returned by `list_drives`.
 2. ~~QMP module + `check_vm`~~
 3. ~~Removable media: `list_drives`, `insert_media`, `eject_media`~~
 4. ~~Input, keyboard: `type_text`, `send_keys` (mouse pending)~~
-5. Output: `screenshot` (2× upscale), `read_text_screen` (B8000 text-mode
-   video memory)
+5. ~~Output: `screenshot` (2× upscale), `read_text_screen` (video memory
+   via BIOS Data Area: mode/columns/rows/page-aware, color and mono)~~
 6. Mouse: `mouse_click`, `mouse_drag`
 7. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
