@@ -141,6 +141,11 @@ scale for you.
   and paced — PS/2 carries at most 127 units per packet, so one huge
   delta leaves a backlog that drains for seconds and swallows everything
   sent meanwhile (every click then lands at 0,0).
+- Text-mode tools adapt to the screen geometry rather than assuming
+  80x25: every call reads the current mode, column count, row count and
+  active page from the BIOS Data Area, so 40-column modes, EGA 80x43,
+  VGA 80x50 and the monochrome adapter at 0xB0000 all work. VESA text
+  modes are not recognised and are reported as graphics.
 - Drive text-mode screens from the keyboard, not the pointer.
   `read_shortcuts` and `activate_menu` are exact: they read the letters
   the application itself highlights in video memory and press them.
@@ -167,7 +172,10 @@ scale for you.
    table; DOS usually needs y = 2.0)~~
 7. ~~Closed-loop text-mode pointer~~ — built, measured, then dropped:
    keyboard accelerators are exact where pointing is approximate
-8. ~~Keyboard-first text mode: `read_shortcuts`, `activate_menu`~~
+8. ~~Keyboard-first text mode: `read_shortcuts`, `activate_menu`~~ —
+   validated on MS-DOS EDIT and Turbo Pascal 7; accelerators are revealed
+   with Alt when an application hides them, and status-bar hints are
+   parsed in all three shapes seen in the wild
 9. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)

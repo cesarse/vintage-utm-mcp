@@ -77,6 +77,36 @@ def test_parses_modifier_combinations() -> None:
     assert {h["key"] for h in hints} == {"Ctrl+Q", "Alt-F4"}
 
 
+def test_parses_bracketed_hint_and_ignores_surrounding_prose() -> None:
+    # MS-DOS EDIT's idle status bar. "Press ALT to activate menus" is
+    # prose and must not be mistaken for a shortcut.
+    hints = parse_key_hints(
+        " MS-DOS Editor  <F1=Help> Press ALT to activate menus         │"
+    )
+    assert hints == [{"key": "F1", "action": "Help"}]
+
+
+def test_parses_space_separated_hints() -> None:
+    # Turbo Vision (Turbo Pascal 7) separates key from action by a space.
+    hints = parse_key_hints(
+        " F1 Help  F2 Save  F3 Open  Alt+F9 Compile  F9 Make  Alt+F10 Local menu"
+    )
+    assert hints == [
+        {"key": "F1", "action": "Help"},
+        {"key": "F2", "action": "Save"},
+        {"key": "F3", "action": "Open"},
+        {"key": "Alt+F9", "action": "Compile"},
+        {"key": "F9", "action": "Make"},
+        {"key": "Alt+F10", "action": "Local menu"},
+    ]
+
+
+def test_space_separated_form_requires_a_real_key() -> None:
+    # Without an equals sign, a bare word pair is not a shortcut.
+    assert parse_key_hints("Enter directory path and file mask") == []
+    assert parse_key_hints("Turbo Pascal  Version 7.0  Copyright") == []
+
+
 def test_ignores_prose_without_hints() -> None:
     assert parse_key_hints("MS-DOS Editor  Press ALT to activate menus") == []
 
@@ -84,3 +114,11 @@ def test_ignores_prose_without_hints() -> None:
 def test_deduplicates_repeated_hints() -> None:
     hints = parse_key_hints("F1=Help  something  F1=Help")
     assert len(hints) == 1
+
+
+def test_named_key_in_prose_is_not_a_hint() -> None:
+    # Real trap from Turbo Pascal's save dialog: "Enter" is a key name and
+    # "Enter directory path" reads like a hint. The action of a real hint
+    # is capitalised and short; prose is not.
+    hints = parse_key_hints(" F1 Help │ Enter directory path and file mask")
+    assert hints == [{"key": "F1", "action": "Help"}]

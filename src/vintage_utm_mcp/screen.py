@@ -181,13 +181,25 @@ def find_accelerators(
     return found
 
 
-#: "F1=Help", "Esc=Cancel", "Ctrl+Q=Quit", "Alt+F4 Close"
-_HINT = re.compile(
-    r"\b((?:Ctrl|Alt|Shift)[+-])?"
-    r"(F\d{1,2}|Esc|Enter|Tab|Del|Ins|Space|PgUp|PgDn|Arrow|[A-Z])"
-    r"\s*=\s*"
-    r"([A-Za-z][\w ]{0,20}?)"
-    r"(?=\s{2,}|\s*[│|]|\s*$)",
+_MODIFIER = r"(?:(?:Ctrl|Alt|Shift)[+-])?"
+_NAMED = (
+    r"(?:F\d{1,2}|Esc|Enter|Return|Tab|Del|Ins|Space|PgUp|PgDn|Home|End|Arrow)"
+)
+#: Where a hint ends: two or more spaces, a frame character, a closing
+#: bracket, or the end of the line.
+_END = r"(?=[>\]\)]|\s{2,}|\s*[│|]|\s*$)"
+
+#: "F1=Help", "<F1=Help>", "Ctrl+Q=Quit", "Esc=Cancel". The equals sign
+#: makes the intent unambiguous, so a bare letter is accepted as the key.
+_HINT_EQUALS = re.compile(
+    rf"\b({_MODIFIER}(?:{_NAMED}|[A-Z]))\s*=\s*([A-Za-z][\w ]{{0,20}}?){_END}",
+    re.MULTILINE,
+)
+#: "F1 Help   F2 Save   Alt+F9 Compile" (Turbo Vision style). Without an
+#: equals sign only a real key counts — otherwise any two words in prose
+#: would look like a shortcut.
+_HINT_SPACED = re.compile(
+    rf"\b({_MODIFIER}{_NAMED})\s+([A-Z][\w]*(?: [A-Za-z]+){{0,2}}?){_END}",
     re.MULTILINE,
 )
 
@@ -195,18 +207,19 @@ _HINT = re.compile(
 def parse_key_hints(screen_text: str) -> list[dict]:
     """Read the key hints applications print in their status bars.
 
-    Lines like "F1=Help  Esc=Cancel  Tab=Next Field" are a second,
-    independent source of shortcuts — one the application states
+    Three shapes, all seen in the wild: "F1=Help", "<F1=Help>" (MS-DOS
+    EDIT) and "F1 Help" separated by spaces (Turbo Vision). This is a
+    second, independent source of shortcuts — one the application states
     outright rather than one we infer from highlighting.
     """
     hints = []
     seen = set()
-    for modifier, key, action in _HINT.findall(screen_text):
-        combo = f"{modifier}{key}" if modifier else key
-        if combo in seen:
-            continue
-        seen.add(combo)
-        hints.append({"key": combo, "action": action.strip()})
+    for pattern in (_HINT_EQUALS, _HINT_SPACED):
+        for key, action in pattern.findall(screen_text):
+            if key in seen:
+                continue
+            seen.add(key)
+            hints.append({"key": key, "action": action.strip()})
     return hints
 
 

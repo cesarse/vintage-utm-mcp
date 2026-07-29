@@ -658,6 +658,10 @@ async def activate_menu(
     presses Alt+<letter> for the menu, then the item's own letter — the
     deterministic equivalent of clicking, with no pointer involved.
 
+    Some applications only highlight their accelerator letters once Alt
+    has been pressed (MS-DOS EDIT does; Turbo Vision shows them always),
+    so when none are visible this presses Alt and looks again.
+
     Args:
         vm: VM name or UUID.
         menu: menu title as shown, e.g. "File" (case-insensitive).
@@ -677,46 +681,55 @@ async def activate_menu(
                 return accelerator
         return None
 
-    bda, text, attrs = await _text_screen_state(canonical)
-    accelerators = screen.find_accelerators(text, attrs, bda["columns"])
+    async def _accelerators() -> list[dict]:
+        bda, text, attrs = await _text_screen_state(canonical)
+        return screen.find_accelerators(text, attrs, bda["columns"])
+
+    async def _press(keys: list[str]) -> None:
+        await _qmp.execute(
+            canonical,
+            "send-key",
+            {
+                "keys": [{"type": "qcode", "data": key} for key in keys],
+                "hold-time": 100,
+            },
+        )
+
+    accelerators = await _accelerators()
     found = _match(accelerators, menu)
+    revealed = False
+    if found is None:
+        # The application may be hiding its accelerators until Alt.
+        await _press(["alt"])
+        await asyncio.sleep(settle_ms / 1000)
+        accelerators = await _accelerators()
+        found = _match(accelerators, menu)
+        revealed = found is not None
     if found is None:
         raise ValueError(
-            f"no menu {menu!r} on screen; visible labels: "
-            + ", ".join(sorted({a['label'] for a in accelerators})[:12])
+            f"no menu {menu!r} on screen, with or without pressing Alt; "
+            "visible labels: "
+            + (", ".join(sorted({a["label"] for a in accelerators})[:12]) or "none")
         )
-    await _qmp.execute(
-        canonical,
-        "send-key",
-        {
-            "keys": [
-                {"type": "qcode", "data": "alt"},
-                {"type": "qcode", "data": found["key"].lower()},
-            ],
-            "hold-time": 100,
-        },
-    )
-    result = {"menu": found["label"], "menu_key": f"alt-{found['key'].lower()}"}
+    await _press(["alt", found["key"].lower()])
+    result: dict[str, Any] = {
+        "menu": found["label"],
+        "menu_key": f"alt-{found['key'].lower()}",
+    }
+    if revealed:
+        result["accelerators_revealed_with_alt"] = True
     if item is None:
         return result
 
     await asyncio.sleep(settle_ms / 1000)
-    bda, text, attrs = await _text_screen_state(canonical)
-    accelerators = screen.find_accelerators(text, attrs, bda["columns"])
+    accelerators = await _accelerators()
     chosen = _match(accelerators, item)
     if chosen is None:
         raise ValueError(
             f"no item {item!r} in the open menu; visible labels: "
-            + ", ".join(sorted({a['label'] for a in accelerators})[:12])
+            + (", ".join(sorted({a["label"] for a in accelerators})[:12]) or "none")
         )
-    await _qmp.execute(
-        canonical,
-        "send-key",
-        {
-            "keys": [{"type": "qcode", "data": chosen["key"].lower()}],
-            "hold-time": 100,
-        },
-    )
+    await _press([chosen["key"].lower()])
     result.update(item=chosen["label"], item_key=chosen["key"].lower())
     return result
 
