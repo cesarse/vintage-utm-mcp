@@ -112,10 +112,8 @@ def test_locate_text_not_found() -> None:
         locate_text("File  Edit", "Quit")
 
 
-def test_cell_center_px_mode3_geometry() -> None:
-    from vintage_utm_mcp.screen import cell_center_px
+def test_decode_attributes_rejects_short_buffer() -> None:
+    from vintage_utm_mcp.screen import decode_attributes
 
-    # Mode 3: 720x400 framebuffer, 80x25 cells of 9x16.
-    assert cell_center_px(0, 0, 80, 25, 720, 400) == (4, 8)  # round(4.5) -> 4, banker's rounding
-    assert cell_center_px(24, 79, 80, 25, 720, 400) == (716, 392)
-    assert cell_center_px(12, 40, 80, 25, 720, 400) == (364, 200)
+    with pytest.raises(ScreenError, match="too short"):
+        decode_attributes(b"\x41\x07", 80, 25)

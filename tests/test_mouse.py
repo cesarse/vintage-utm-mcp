@@ -72,3 +72,22 @@ def test_pick_relative_mouse_already_relative() -> None:
 def test_pick_relative_mouse_no_relative_available() -> None:
     mice = [{"index": 1, "name": "QEMU USB Tablet", "current": True, "absolute": True}]
     assert mouse.pick_relative_mouse(mice) is None
+
+
+def test_plan_reset_is_paced_and_bounded() -> None:
+    from vintage_utm_mcp.mouse import RESET_STEP, plan_reset
+
+    moves = plan_reset(720, 400)
+    # No single event may carry a big backlog the PS/2 device can't drain.
+    assert all(abs(dx) <= RESET_STEP and abs(dy) <= RESET_STEP for dx, dy in moves)
+    total_x = sum(dx for dx, _ in moves)
+    total_y = sum(dy for _, dy in moves)
+    # Enough to reach the corner from anywhere, without wild overshoot.
+    assert -720 * 2 < total_x <= -720
+    assert -400 * 4 < total_y <= -400
+
+
+def test_plan_reset_defaults_without_known_screen() -> None:
+    from vintage_utm_mcp.mouse import plan_reset
+
+    assert plan_reset(None, None), "must still plan a reset with no screen info"

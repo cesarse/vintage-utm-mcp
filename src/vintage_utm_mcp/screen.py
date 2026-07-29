@@ -13,6 +13,7 @@ small (retro) resolutions 2x with nearest-neighbor to keep pixels crisp.
 from __future__ import annotations
 
 import io
+import re
 
 from PIL import Image as PILImage
 
@@ -104,13 +105,109 @@ def locate_text(
     )
 
 
-def cell_center_px(
-    row: int, column: int, columns: int, rows: int, width: int, height: int
-) -> tuple[int, int]:
-    """Pixel center of a character cell, given screen geometry."""
-    cell_w = width / columns
-    cell_h = height / rows
-    return round((column + 0.5) * cell_w), round((row + 0.5) * cell_h)
+def decode_attributes(raw: bytes, columns: int, rows: int) -> list[int]:
+    """Extract the attribute byte of every cell, row-major.
+
+    The DOS mouse driver draws its text-mode pointer by altering the
+    ATTRIBUTE of the cell under it, leaving the character untouched — so
+    attributes are how the pointer becomes visible to us.
+    """
+    expected = columns * rows * 2
+    if len(raw) < expected:
+        raise ScreenError(
+            f"text buffer dump too short: {len(raw)} < {expected} bytes"
+        )
+    return [raw[i * 2 + 1] for i in range(columns * rows)]
+
+
+def _attribute_runs(row_attrs: list[int]) -> list[tuple[int, int, int]]:
+    """Split a row of attributes into (start, length, attribute) runs."""
+    runs: list[tuple[int, int, int]] = []
+    start = 0
+    for index in range(1, len(row_attrs) + 1):
+        if index == len(row_attrs) or row_attrs[index] != row_attrs[start]:
+            runs.append((start, index - start, row_attrs[start]))
+            start = index
+    return runs
+
+
+def _word_at(line: str, column: int) -> str:
+    """The run of non-space characters containing `column`."""
+    left = column
+    while left > 0 and line[left - 1] != " ":
+        left -= 1
+    right = column
+    while right + 1 < len(line) and line[right + 1] != " ":
+        right += 1
+    return line[left : right + 1]
+
+
+def find_accelerators(
+    screen_text: str, attributes: list[int], columns: int
+) -> list[dict]:
+    """Locate keyboard accelerators highlighted on a text-mode screen.
+
+    TUI applications of the era mark the shortcut letter of every label
+    by giving that single cell a different attribute — the F of "File",
+    the x of "Exit". A one-cell island of attribute inside a row is
+    therefore an accelerator, and the surrounding word is its label.
+
+    Returns dicts of label, key, row and column, in reading order.
+    """
+    lines = screen_text.split("\n")
+    found: list[dict] = []
+    for row, line in enumerate(lines):
+        row_attrs = attributes[row * columns : (row + 1) * columns]
+        if not row_attrs:
+            continue
+        padded = line.ljust(columns)
+        for start, length, _ in _attribute_runs(row_attrs):
+            if length != 1:
+                continue
+            char = padded[start]
+            if not char.isalnum():
+                continue
+            label = _word_at(padded, start)
+            if len(label) < 2:
+                continue
+            found.append(
+                {
+                    "label": label.strip(".<>[]()"),
+                    "key": char,
+                    "row": row,
+                    "column": start,
+                }
+            )
+    return found
+
+
+#: "F1=Help", "Esc=Cancel", "Ctrl+Q=Quit", "Alt+F4 Close"
+_HINT = re.compile(
+    r"\b((?:Ctrl|Alt|Shift)[+-])?"
+    r"(F\d{1,2}|Esc|Enter|Tab|Del|Ins|Space|PgUp|PgDn|Arrow|[A-Z])"
+    r"\s*=\s*"
+    r"([A-Za-z][\w ]{0,20}?)"
+    r"(?=\s{2,}|\s*[│|]|\s*$)",
+    re.MULTILINE,
+)
+
+
+def parse_key_hints(screen_text: str) -> list[dict]:
+    """Read the key hints applications print in their status bars.
+
+    Lines like "F1=Help  Esc=Cancel  Tab=Next Field" are a second,
+    independent source of shortcuts — one the application states
+    outright rather than one we infer from highlighting.
+    """
+    hints = []
+    seen = set()
+    for modifier, key, action in _HINT.findall(screen_text):
+        combo = f"{modifier}{key}" if modifier else key
+        if combo in seen:
+            continue
+        seen.add(combo)
+        hints.append({"key": combo, "action": action.strip()})
+    return hints
 
 
 def ppm_size(ppm: bytes) -> tuple[int, int]:

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "MCP server to control UTM virtual machines (retro-OS friendly: MS-DOS, OS/2, Windows 3.x)"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.2",
+    "mcp>=1.2,<2",  # 2.x removed mcp.server.fastmcp; migration pending
     "qemu.qmp>=0.0.3",
     "pillow>=10",
 ]
@@ -15,7 +15,7 @@ vintage-utm-mcp = "vintage_utm_mcp.server:main"
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "mcp[cli]>=1.2",  # inspector: `uv run mcp dev src/vintage_utm_mcp/server.py`
+    "mcp[cli]>=1.2,<2",  # inspector: `uv run mcp dev src/vintage_utm_mcp/server.py`
 ]
 
 [build-system]

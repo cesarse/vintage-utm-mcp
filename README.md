@@ -1,9 +1,10 @@
 # vintage-utm-mcp
 
-An MCP server for handling vintage operating systems (like MS-DOS, OS/2,
-Windows 3.x and classic Mac OS) running in [UTM](https://mac.getutm.app/)
-on macOS. Designed for guests that cannot run a guest agent: everything
-goes through utmctl (lifecycle) and QMP (in-guest interaction).
+An MCP server for handling vintage operating systems (like MS-DOS,
+OS/2, Windows 3.x and classic Mac OS) running in
+[UTM](https://mac.getutm.app/) on macOS. Designed for guests that
+cannot run a guest agent: everything goes through utmctl (lifecycle)
+and QMP (in-guest interaction).
 
 ## Requirements
 
@@ -116,7 +117,17 @@ returned by `list_drives`.
 | `read_text_screen(vm)` | Exact characters of an x86 text-mode screen, read from video memory |
 | `mouse_click(vm, x, y, button=left, double=false)` | Click at last-screenshot coordinates (corner-reset dead reckoning) |
 | `mouse_drag(vm, x1, y1, x2, y2, button=left)` | Drag with paced steps (old GUIs need to sample the motion) |
-| `mouse_click_text_screen(vm, text, occurrence=1, ...)` | Click ON a string of a text-mode screen: located in video memory, zero aiming error |
+| `read_shortcuts(vm)` | Keyboard shortcuts offered by the current text-mode screen: highlighted accelerators + status-bar hints |
+| `activate_menu(vm, menu, item=None)` | Open a menu and pick an item by their own accelerator keys |
+
+## Coordinates
+
+All mouse tools take coordinates in the pixel space of the **last
+screenshot** you took, not the guest's. Origin `(0,0)` is the top-left
+corner, x grows right, y grows down. Retro resolutions come back
+upscaled (usually 2×), so a 640×480 guest yields a 1280×960 image and
+its center is around `(640, 480)` — the server divides by the recorded
+scale for you.
 
 ## Notes
 
@@ -125,6 +136,21 @@ returned by `list_drives`.
 - `stop_vm` defaults to `force` (power-button semantics): DOS-era
   guests do not answer ACPI requests. Stop at an idle `C:\>` prompt and
   mind SMARTDRV's write-behind cache.
+- Mouse motion works over a relative pointer, re-anchored at the
+  top-left corner before every gesture. The reset is sized to the screen
+  and paced — PS/2 carries at most 127 units per packet, so one huge
+  delta leaves a backlog that drains for seconds and swallows everything
+  sent meanwhile (every click then lands at 0,0).
+- Drive text-mode screens from the keyboard, not the pointer.
+  `read_shortcuts` and `activate_menu` are exact: they read the letters
+  the application itself highlights in video memory and press them.
+  Pointing there was tried and dropped — the DOS driver's 640x200
+  virtual screen, PS/2 2:1 scaling and pointer acceleration make
+  positioning approximate at best, and applications hide the pointer
+  while you type. `mouse_click` and `mouse_drag` remain for graphics
+  modes and GUIs (Windows 3.x, classic Mac OS), where no cell grid
+  exists; they are open-loop and may need the `[mouse]` calibration
+  factors.
 - QEMU accepts a single QMP client per endpoint; the server keeps one
   persistent connection per VM and reconnects after VM restarts.
 
@@ -133,15 +159,21 @@ returned by `list_drives`.
 1. ~~Lifecycle (utmctl)~~
 2. ~~QMP module + `check_vm`~~
 3. ~~Removable media: `list_drives`, `insert_media`, `eject_media`~~
-4. ~~Input, keyboard: `type_text`, `send_keys` (mouse pending)~~
+4. ~~Input, keyboard: `type_text`, `send_keys`~~
 5. ~~Output: `screenshot` (2× upscale), `read_text_screen` (video memory
    via BIOS Data Area: mode/columns/rows/page-aware, color and mono)~~
-6. ~~Mouse: `mouse_click`, `mouse_drag` (relative pointer + per-VM
-   calibration in the `[mouse]` config table; DOS usually needs y = 2.0)~~
-7. `detect_layout` calibration probe: type ambiguous characters, read
+6. ~~Mouse: `mouse_click`, `mouse_drag`, `mouse_click_text_screen`
+   (relative pointer + per-VM calibration in the `[mouse]` config
+   table; DOS usually needs y = 2.0)~~
+7. ~~Closed-loop text-mode pointer~~ — built, measured, then dropped:
+   keyboard accelerators are exact where pointing is approximate
+8. ~~Keyboard-first text mode: `read_shortcuts`, `activate_menu`~~
+9. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)
-8. Known debt: media library provenance manifest (name-collision handling
+10. Known debt: migrate to MCP SDK 2.x (`mcp.server.fastmcp` was removed
+   in favour of `mcp.server.mcpserver`); the dependency is pinned `<2`
+11. Known debt: media library provenance manifest (name-collision handling
    currently relies on file size, which is blind to fixed-size floppies)
 
 ## Tests

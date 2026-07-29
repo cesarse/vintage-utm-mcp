@@ -25,9 +25,31 @@ import tomllib
 
 from vintage_utm_mcp import qmp
 
-STEP = 24  # max per-event delta, below common acceleration thresholds
+STEP = 24  # max per-axis delta for precise walking
+RESET_STEP = 48  # coarser pacing for the corner reset
+RESET_MARGIN_X = 1.5  # safety factor over screen width
+RESET_MARGIN_Y = 2.5  # vertical mickeys are ~2x pixels on DOS drivers
 
 VALID_BUTTONS = frozenset({"left", "right", "middle"})
+
+
+def plan_reset(
+    guest_width: int | None, guest_height: int | None, step: int = RESET_STEP
+) -> list[tuple[int, int]]:
+    """Plan a paced walk to the top-left corner.
+
+    PS/2 mice carry at most 127 units per packet, so a single huge delta
+    (e.g. -5000) leaves thousands of units queued in the device, draining
+    for seconds — any movement or click sent meanwhile is swallowed by
+    that backlog and lands at the corner instead of the target. Keep the
+    reset just big enough to reach the corner from anywhere on screen,
+    and deliver it in paced steps the guest can consume.
+    """
+    width = guest_width or 1024
+    height = guest_height or 768
+    return plan_moves(
+        -round(width * RESET_MARGIN_X), -round(height * RESET_MARGIN_Y), step
+    )
 
 
 class MouseError(ValueError):

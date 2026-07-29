@@ -429,30 +429,7 @@ async def read_text_screen(vm: str) -> dict[str, Any]:
     """
     entry = _find_vm(vm)
     canonical = _canonical(vm, entry)
-    target = await _qmp.execute(canonical, "query-target")
-    arch = target.get("arch", "unknown")
-    if arch not in ("i386", "x86_64"):
-        raise ValueError(
-            f"text-screen reading is x86-only and this VM is {arch!r}; "
-            "use screenshot instead"
-        )
-    bda_raw = await _dump_to_bytes(
-        canonical, "pmemsave", {"val": 0x400, "size": 0x100}, ".bin"
-    )
-    bda = screen.parse_bda(bda_raw)
-    if bda["mode"] not in screen.TEXT_MODES:
-        raise ValueError(
-            f"guest is in graphics mode 0x{bda['mode']:02X}; "
-            "use screenshot instead"
-        )
-    size = bda["columns"] * bda["rows"] * 2
-    buffer = await _dump_to_bytes(
-        canonical,
-        "pmemsave",
-        {"val": screen.text_buffer_address(bda), "size": size},
-        ".bin",
-    )
-    text = screen.decode_text_buffer(buffer, bda["columns"], bda["rows"])
+    bda, text, _ = await _text_screen_state(canonical)
     return {
         "text": text,
         "columns": bda["columns"],
@@ -490,8 +467,9 @@ async def mouse_click(
     so driver drift never accumulates. If clicks land offset (DOS's
     default driver halves vertical motion), set per-VM factors in the
     [mouse] table of ~/.vintage-utm-mcp/qmp.toml (y = 2.0 is the usual
-    DOS fix) — verify with a follow-up screenshot. On text-mode screens,
-    prefer mouse_click_text_screen.
+    DOS fix) — verify with a follow-up screenshot. Text-mode screens are
+    better driven from the keyboard: see read_shortcuts and
+    activate_menu, which are exact where pointing is approximate.
 
     Args:
         vm: VM name or UUID.
@@ -563,23 +541,47 @@ async def _ensure_relative_pointer(vm: str) -> None:
         )
 
 
-async def _mouse_goto_guest(vm: str, gx: int, gy: int) -> None:
+async def _corner_reset(vm: str, guest_width: int, guest_height: int) -> None:
+    for sx, sy in mouse.plan_reset(guest_width, guest_height):
+        await _send_input(vm, _rel(sx, sy))
+        await asyncio.sleep(0.010)
+    await asyncio.sleep(0.30)
+
+
+async def _mouse_goto_guest(
+    vm: str,
+    gx: int,
+    gy: int,
+    guest_width: int | None = None,
+    guest_height: int | None = None,
+) -> None:
     """Anchor at the top-left corner, then dead-reckon to guest (gx, gy)."""
     await _ensure_relative_pointer(vm)
     calibration = mouse.read_calibration(vm)
-    for _ in range(3):  # corner reset; the screen edge clamps the overshoot
-        await _send_input(vm, _rel(-5000, -5000))
-        await asyncio.sleep(0.02)
+    # The reset drains before the precise walk: anything sent while a
+    # backlog remains is simply added to it.
+    await _corner_reset(vm, guest_width or 1024, guest_height or 768)
     dx, dy = mouse.apply_calibration(gx, gy, calibration)
     for sx, sy in mouse.plan_moves(dx, dy):
         await _send_input(vm, _rel(sx, sy))
         await asyncio.sleep(0.012)
+    await asyncio.sleep(0.10)
+
+
+def _guest_screen(vm: str) -> tuple[int | None, int | None]:
+    """Guest framebuffer size from the last screenshot, if any."""
+    info = _LAST_SCREEN.get(vm)
+    if not info:
+        return None, None
+    scale = info.get("scale", 1) or 1
+    return info["width"] // scale, info["height"] // scale
 
 
 async def _mouse_goto(vm: str, x: int, y: int) -> tuple[int, int]:
     """Goto for image-space coordinates (last screenshot's pixel space)."""
     gx, gy = mouse.image_to_guest(x, y, _LAST_SCREEN.get(vm))
-    await _mouse_goto_guest(vm, gx, gy)
+    gw, gh = _guest_screen(vm)
+    await _mouse_goto_guest(vm, gx, gy, gw, gh)
     return gx, gy
 
 
@@ -592,67 +594,131 @@ async def _click(vm: str, button: str, double: bool) -> None:
         await _send_input(vm, _btn(button, False))
 
 
-@mcp.tool()
-async def mouse_click_text_screen(
-    vm: str,
-    text: str,
-    occurrence: int = 1,
-    button: str = "left",
-    double: bool = False,
-) -> dict[str, Any]:
-    """Click ON a string visible on an x86 text-mode screen (DOS, OS/2
-    console) — no coordinates, no vision: the screen text is read from
-    video memory, the string is located, and its cell center is clicked.
-
-    Removes all aiming error; per-VM mouse calibration still applies to
-    the pointer walk, and the guest still needs its mouse driver loaded
-    (in DOS: MOUSE.COM). For graphics modes/GUIs use mouse_click.
-
-    Args:
-        vm: VM name or UUID.
-        text: exact string to click (e.g. "File"); case-sensitive.
-        occurrence: which match, in reading order (1 = first).
-        button: "left", "right" or "middle".
-        double: double-click.
-    """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
-    mouse.validate_button(button)
-    target = await _qmp.execute(canonical, "query-target")
+async def _text_screen_state(vm: str) -> tuple[dict[str, Any], str, list[int]]:
+    """Video state, characters and attributes of an x86 text-mode screen."""
+    target = await _qmp.execute(vm, "query-target")
     if target.get("arch") not in ("i386", "x86_64"):
-        raise ValueError("mouse_click_text_screen is x86 text-mode only; use mouse_click")
+        raise ValueError(
+            f"text-mode reading is x86-only and this VM is "
+            f"{target.get('arch', 'unknown')!r}; use screenshot instead"
+        )
     bda_raw = await _dump_to_bytes(
-        canonical, "pmemsave", {"val": 0x400, "size": 0x100}, ".bin"
+        vm, "pmemsave", {"val": 0x400, "size": 0x100}, ".bin"
     )
     bda = screen.parse_bda(bda_raw)
     if bda["mode"] not in screen.TEXT_MODES:
         raise ValueError(
-            f"guest is in graphics mode 0x{bda['mode']:02X}; use mouse_click"
+            f"guest is in graphics mode 0x{bda['mode']:02X}; use screenshot"
         )
-    buffer = await _dump_to_bytes(
-        canonical,
+    raw = await _dump_to_bytes(
+        vm,
         "pmemsave",
-        {"val": screen.text_buffer_address(bda),
-         "size": bda["columns"] * bda["rows"] * 2},
+        {
+            "val": screen.text_buffer_address(bda),
+            "size": bda["columns"] * bda["rows"] * 2,
+        },
         ".bin",
     )
-    screen_text = screen.decode_text_buffer(buffer, bda["columns"], bda["rows"])
-    row, col = screen.locate_text(screen_text, text, occurrence)
-    width, height = screen.ppm_size(
-        await _dump_to_bytes(canonical, "screendump", {}, ".ppm")
-    )
-    gx, gy = screen.cell_center_px(
-        row, col, bda["columns"], bda["rows"], width, height
-    )
-    await _mouse_goto_guest(canonical, gx, gy)
-    await _click(canonical, button, double)
+    text = screen.decode_text_buffer(raw, bda["columns"], bda["rows"])
+    attrs = screen.decode_attributes(raw, bda["columns"], bda["rows"])
+    return bda, text, attrs
+
+
+@mcp.tool()
+async def read_shortcuts(vm: str) -> dict[str, Any]:
+    """List the keyboard shortcuts currently offered on a text-mode screen.
+
+    Two independent sources, both read straight from video memory:
+    - accelerators: the highlighted letter of each visible label (the F
+      of "File", the x of "Exit"), detected from the attribute bytes;
+    - key hints: what the application spells out in its status bar
+      ("F1=Help", "Esc=Cancel").
+
+    Use this to drive DOS/OS2 applications from the keyboard, which is
+    exact — unlike pointing, which depends on the guest's mouse driver.
+    Call it again after the screen changes: an open menu advertises a
+    different set.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    bda, text, attrs = await _text_screen_state(canonical)
     return {
-        "clicked_text": text,
-        "row": row,
-        "column": col,
-        "guest_coords": [gx, gy],
-        "calibration": list(mouse.read_calibration(canonical)),
+        "accelerators": screen.find_accelerators(text, attrs, bda["columns"]),
+        "key_hints": screen.parse_key_hints(text),
     }
+
+
+@mcp.tool()
+async def activate_menu(
+    vm: str, menu: str, item: str | None = None, settle_ms: int = 250
+) -> dict[str, Any]:
+    """Open a menu (and optionally choose an item) by keyboard.
+
+    Finds the accelerator letters the application highlights on screen,
+    presses Alt+<letter> for the menu, then the item's own letter — the
+    deterministic equivalent of clicking, with no pointer involved.
+
+    Args:
+        vm: VM name or UUID.
+        menu: menu title as shown, e.g. "File" (case-insensitive).
+        item: item to choose once the menu is open, e.g. "Save As".
+        settle_ms: pause after opening the menu before reading it back.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+
+    def _match(accelerators: list[dict], label: str) -> dict | None:
+        wanted = label.strip().lower()
+        for accelerator in accelerators:
+            if accelerator["label"].lower() == wanted:
+                return accelerator
+        for accelerator in accelerators:
+            if accelerator["label"].lower().startswith(wanted):
+                return accelerator
+        return None
+
+    bda, text, attrs = await _text_screen_state(canonical)
+    accelerators = screen.find_accelerators(text, attrs, bda["columns"])
+    found = _match(accelerators, menu)
+    if found is None:
+        raise ValueError(
+            f"no menu {menu!r} on screen; visible labels: "
+            + ", ".join(sorted({a['label'] for a in accelerators})[:12])
+        )
+    await _qmp.execute(
+        canonical,
+        "send-key",
+        {
+            "keys": [
+                {"type": "qcode", "data": "alt"},
+                {"type": "qcode", "data": found["key"].lower()},
+            ],
+            "hold-time": 100,
+        },
+    )
+    result = {"menu": found["label"], "menu_key": f"alt-{found['key'].lower()}"}
+    if item is None:
+        return result
+
+    await asyncio.sleep(settle_ms / 1000)
+    bda, text, attrs = await _text_screen_state(canonical)
+    accelerators = screen.find_accelerators(text, attrs, bda["columns"])
+    chosen = _match(accelerators, item)
+    if chosen is None:
+        raise ValueError(
+            f"no item {item!r} in the open menu; visible labels: "
+            + ", ".join(sorted({a['label'] for a in accelerators})[:12])
+        )
+    await _qmp.execute(
+        canonical,
+        "send-key",
+        {
+            "keys": [{"type": "qcode", "data": chosen["key"].lower()}],
+            "hold-time": 100,
+        },
+    )
+    result.update(item=chosen["label"], item_key=chosen["key"].lower())
+    return result
 
 
 def main() -> None:
