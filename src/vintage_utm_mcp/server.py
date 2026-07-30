@@ -483,6 +483,9 @@ GOTO_MAX_ITERATIONS = 14
 #: Consecutive no-movement commands tolerated before giving up; guests
 #: that damp motion need a few nudges before a fraction rolls over.
 GOTO_MAX_STALLS = 3
+#: Corrections attempted mid-drag, on guests that keep the cursor visible
+#: while the button is down.
+DRAG_REFINE_ATTEMPTS = 6
 
 
 def _measurable(
@@ -826,9 +829,16 @@ async def mouse_drag(
             await _send_input(canonical, _rel(sx, sy))
             await asyncio.sleep(0.018)
         await asyncio.sleep(0.15)  # settle before dropping
-        drop = await _verify_drop(canonical, gx2, gy2)
+        await _refine_drag(canonical, gx2, gy2)
     finally:
         await _send_input(canonical, _btn(button, False))
+    # Measured after the release, not before: while the button is down the
+    # guest shows a drag outline or ghost icon in place of the cursor and
+    # there is nothing recognisable to find. Letting go restores the arrow,
+    # and the pointer does not move, so the reading still describes the
+    # drop point.
+    await asyncio.sleep(0.25)
+    drop = await _verify_drop(canonical, gx2, gy2)
     return {
         "grab": grab,
         "drop": drop,
@@ -838,12 +848,47 @@ async def mouse_drag(
     }
 
 
-async def _verify_drop(vm: str, gx: int, gy: int) -> dict[str, Any]:
-    """Measure where the pointer sits before the button is released.
+async def _refine_drag(vm: str, gx: int, gy: int) -> None:
+    """Steer onto the drop point while the button is still held.
 
-    Deliberately does not try to *correct* the position: relearning mid-
-    drag would need a probe move, and moving while the button is down is
-    part of the gesture, not a free diagnostic.
+    Only some guests allow this. Classic Mac OS drags a window as an
+    outline and leaves the arrow alone, so the loop can still see what it
+    is steering — worth doing, because its damped scaling made an
+    uncorrected drag land 62 px wide of a drop point in one measurement.
+    Windows 3.11 swaps the cursor for a ghost icon instead; there is then
+    nothing to recognise, and the open-loop travel simply stands.
+    """
+    gain = _GAIN.get(vm, DEFAULT_GAIN)
+    for _ in range(DRAG_REFINE_ATTEMPTS):
+        frame = await _capture(vm)
+        found = _locate_known(vm, frame)
+        if found is None:
+            return  # cursor replaced by a drag image: nothing to steer by
+        sprite, position = found
+        hotspot = pointer.hotspot_of(position, sprite)
+        if (hotspot[0], hotspot[1]) == (gx, gy):
+            return
+        command = pointer.clamp_command(
+            pointer.correction((gx, gy), hotspot, gain),
+            position,
+            sprite,
+            frame.width,
+            frame.height,
+            gain,
+        )
+        if command == (0, 0):
+            return
+        for sx, sy in mouse.plan_moves(*command):
+            await _send_input(vm, _rel(sx, sy))
+            await asyncio.sleep(0.018)
+        await asyncio.sleep(0.12)
+
+
+async def _verify_drop(vm: str, gx: int, gy: int) -> dict[str, Any]:
+    """Measure where the pointer ended up, just after the button came up.
+
+    Deliberately does not try to *correct* the position: the drop has
+    already happened, so moving now would only misreport it.
     """
     try:
         found = _locate_known(vm, await _capture(vm))

@@ -117,7 +117,7 @@ returned by `list_drives`.
 | `read_text_screen(vm)` | Exact characters of an x86 text-mode screen, read from video memory |
 | `mouse_locate(vm)` | Where the cursor is, read out of the framebuffer (diagnostic) |
 | `mouse_click(vm, x, y, button=left, double=false)` | Click at last-screenshot coordinates, closed loop; reports `on_target` and the residual |
-| `mouse_drag(vm, x1, y1, x2, y2, button=left)` | Drag: grab point verified before the button goes down, drop measured after |
+| `mouse_drag(vm, x1, y1, x2, y2, button=left)` | Drag: grab verified before the button goes down, drop steered and measured |
 | `read_shortcuts(vm)` | Keyboard shortcuts offered by the current text-mode screen: highlighted accelerators + status-bar hints |
 | `activate_menu(vm, menu, item=None)` | Open a menu and pick an item by their own accelerator keys |
 
@@ -188,6 +188,19 @@ scale for you.
   animating guest, or a cursor the framebuffer does not carry at all.
   Guests in that last category still work; pointing falls back to
   open-loop dead reckoning and says so in the reply's `method`.
+- Dragging is verified to move real objects: a Program Manager group icon
+  in Windows 3.11, a Finder window in Mac OS 9. The grab point is reached
+  closed loop and checked before the button goes down, because that end
+  decides what gets picked up. What happens next depends on the guest:
+  - Mac OS 9 drags a window as an outline and leaves the arrow alone, so
+    the pointer stays recognisable and the tools keep steering while the
+    button is held. That matters — an uncorrected drag landed **62 px**
+    wide of its drop point, and correcting brought it to 1 px;
+  - Windows 3.11 replaces the cursor with a ghost icon, so mid-drag there
+    is blind and the paced open-loop travel stands (its exact 2.0 gain
+    makes that land on the pixel anyway).
+  Either way the drop is measured **after** the button is released, when
+  the ordinary cursor is back, and reported as `drop.residual`.
 - The cursor's **hotspot is assumed**, not measured: it cannot be read
   out of the framebuffer. (0, 0) is right for the standard arrow, whose
   tip is its top-left corner, but a centred cursor (crosshair, I-beam)
