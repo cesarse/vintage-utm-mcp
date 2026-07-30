@@ -16,7 +16,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Image as McpImage
 
-from vintage_utm_mcp import keyboard, mouse, qmp, screen, utmctl
+from vintage_utm_mcp import keyboard, mouse, pointer, qmp, screen, utmctl
 
 mcp = FastMCP("vintage-utm")
 
@@ -455,6 +455,241 @@ def _btn(button: str, down: bool) -> list[dict]:
     return [{"type": "btn", "data": {"button": button, "down": down}}]
 
 
+# --- Closed-loop pointing -------------------------------------------------
+#
+# QEMU's screendump captures the cursor (verified on Windows 3.11: the
+# display driver draws it into video memory as an opaque sprite), so the
+# pointer can be measured instead of assumed. Learned sprites and the
+# measured gain are cached per VM: learning costs one extra probe move,
+# after which a single capture locates the cursor in well under a
+# millisecond.
+_SPRITES: dict[str, list[pointer.Sprite]] = {}
+_GAIN: dict[str, tuple[float, float]] = {}
+
+#: Learning probes, tried in order from the top-left corner. Sideways
+#: first: the strip along the top of the screen is the likeliest stretch
+#: of flat background, and 16 units clears the cursor's own width whether
+#: the guest accelerates the move (32 px) or not (16 px), so the two
+#: images cannot overlap and merge into one blob.
+LEARN_PROBES = ((16, 0), (0, 16), (24, 24))
+DEFAULT_GAIN = (1.0, 1.0)
+GOTO_TOLERANCE = 0  # the loop can and does land exactly
+GOTO_MAX_ITERATIONS = 6
+
+
+def _measurable(
+    position: tuple[int, int], sprite: pointer.Sprite, frame: pointer.Frame
+) -> bool:
+    """Is the cursor clear of every edge, so its travel was not clamped?"""
+    return (
+        0 < position[0] < frame.width - sprite.width
+        and 0 < position[1] < frame.height - sprite.height
+    )
+
+
+async def _capture(vm: str) -> pointer.Frame:
+    return pointer.Frame.from_image_bytes(
+        await _dump_to_bytes(vm, "screendump", {}, ".ppm")
+    )
+
+
+async def _walk(vm: str, dx: int, dy: int) -> None:
+    """Deliver a relative move in paced steps (PS/2 carries <=127 per packet)."""
+    for sx, sy in mouse.plan_moves(dx, dy):
+        await _send_input(vm, _rel(sx, sy))
+        await asyncio.sleep(0.012)
+    await asyncio.sleep(0.12)  # let the guest redraw before we look
+
+
+def _locate_known(vm: str, frame: pointer.Frame, near: tuple[int, int] | None = None):
+    """Try every sprite already learned for this VM.
+
+    Cursors change shape (arrow, hourglass, I-beam) and each shape is
+    learned once; keeping a small library per VM means crossing into a text
+    field costs a lookup rather than a fresh probe move.
+    """
+    sprites = _SPRITES.get(vm, [])
+    for sprite in sprites:
+        position = pointer.locate(frame, sprite)
+        if position is not None:
+            return sprite, position
+    if near is not None:
+        # Whole-template matching just failed. Before concluding the cursor
+        # changed shape, check whether it is merely clipped against an edge.
+        for sprite in sprites:
+            position = pointer.locate_near(frame, sprite, near)
+            if position is not None:
+                return sprite, position
+    return None
+
+
+async def _learn(vm: str) -> tuple[pointer.Sprite, tuple[int, int]]:
+    """Learn the current cursor with a probe move, and cache it.
+
+    Anchored at the top-left corner first. That costs a long walk, but it
+    is the one position that satisfies every precondition at once: the
+    clamp makes it deterministic, the cursor is drawn whole there (it
+    extends down and right from its hotspot, so only the right and bottom
+    edges clip it), and the strip beside it is usually empty desktop —
+    a probe launched from wherever the pointer happened to be tends to
+    land across a window border and learn a sprite cut short by it.
+    """
+    frame = await _capture(vm)
+    await _corner_reset(vm, frame.width, frame.height)
+    errors = []
+    for probe in LEARN_PROBES:
+        before = await _capture(vm)
+        await _walk(vm, *probe)
+        after = await _capture(vm)
+        try:
+            sprite, _, position = pointer.learn_sprite(before, after)
+        except pointer.PointerError as exc:
+            errors.append(f"probe {probe}: {exc}")
+            await _corner_reset(vm, frame.width, frame.height)
+            continue
+        known = _SPRITES.setdefault(vm, [])
+        if not any(s == sprite for s in known):
+            known.append(sprite)
+        return sprite, position
+    raise pointer.PointerError(
+        "could not learn the cursor: " + "; then ".join(errors)
+    )
+
+
+async def _find_pointer(vm: str) -> tuple[pointer.Sprite, tuple[int, int], bool]:
+    """Locate the cursor, learning it first if necessary.
+
+    Returns (sprite, top-left position, learned_now).
+    """
+    known = _locate_known(vm, await _capture(vm))
+    if known is not None:
+        return known[0], known[1], False
+    sprite, position = await _learn(vm)
+    return sprite, position, True
+
+
+async def _closed_loop_goto(
+    vm: str, target_x: int, target_y: int
+) -> dict[str, Any]:
+    """Drive the cursor's hotspot onto a guest pixel, measuring each step.
+
+    No corner reset and no calibration file: the error is observed after
+    every move and the gain is re-estimated from what actually happened.
+    """
+    sprite, position, learned = await _find_pointer(vm)
+    gain = _GAIN.get(vm, DEFAULT_GAIN)
+    target = (target_x, target_y)
+    iterations = 0
+    lost = False
+    seen = {position}
+    for _ in range(GOTO_MAX_ITERATIONS):
+        hotspot = pointer.hotspot_of(position, sprite)
+        error = (target[0] - hotspot[0], target[1] - hotspot[1])
+        if abs(error[0]) <= GOTO_TOLERANCE and abs(error[1]) <= GOTO_TOLERANCE:
+            break
+        command = pointer.correction(target, hotspot, gain)
+        if command == (0, 0):
+            break  # sub-unit error the pointer cannot express
+        await _walk(vm, *command)
+        iterations += 1
+        frame = await _capture(vm)
+        # Where the command should have put it, used to recognise a cursor
+        # clipped against an edge.
+        predicted = (
+            position[0] + round(command[0] * gain[0]),
+            position[1] + round(command[1] * gain[1]),
+        )
+        found = _locate_known(vm, frame, near=predicted)
+        if found is None:
+            # The cursor changed shape mid-gesture — hovering a text field
+            # turns the arrow into an I-beam. Deliberately NOT relearned
+            # here: learning has to anchor at the corner, which would drag
+            # the pointer off the very control that changed the shape, turn
+            # it back into an arrow, and lose it again on the way back.
+            # Stop and say the position is unverified instead.
+            lost = True
+            break
+        sprite, new_position = found
+        observed = (new_position[0] - position[0], new_position[1] - position[1])
+        if _measurable(new_position, sprite, frame):
+            # A move that ran into a screen edge travelled less than it was
+            # told to; believing it would teach the loop a gain far below
+            # the truth (1.667 was seen this way).
+            gain = pointer.refine_gain(gain, command, observed)
+            _GAIN[vm] = gain
+        position = new_position
+        if position in seen:
+            # Back somewhere we have already been: the guest is rounding
+            # our corrections in a way this loop cannot split, and another
+            # pass would only bounce between the same two pixels.
+            break
+        seen.add(position)
+    hotspot = pointer.hotspot_of(position, sprite)
+    residual = [target[0] - hotspot[0], target[1] - hotspot[1]]
+    return {
+        "guest_coords": list(hotspot),
+        "requested": list(target),
+        # A lost cursor means the last move could not be checked, so
+        # neither the landing point nor the error is knowable.
+        "on_target": None if lost else residual == [0, 0],
+        "residual": None if lost else residual,
+        "verified": not lost,
+        **(
+            {
+                "lost_reason": "cursor stopped matching every known sprite "
+                "(it most likely changed shape over the target); the "
+                "position above is the last one actually measured"
+            }
+            if lost
+            else {}
+        ),
+        "iterations": iterations,
+        "gain": [round(gain[0], 3), round(gain[1], 3)],
+        "sprite": {
+            "width": sprite.width,
+            "height": sprite.height,
+            "opaque_pixels": sprite.opaque,
+            "learned_this_call": learned,
+        },
+    }
+
+
+@mcp.tool()
+async def mouse_locate(vm: str) -> dict[str, Any]:
+    """Find the mouse cursor in the guest's framebuffer (graphics modes).
+
+    Diagnostic for the closed-loop pointer: reports where the cursor
+    actually is, in guest pixels, and what sprite it matched. On the first
+    call for a VM (or after the cursor changes shape) it moves the pointer
+    a little to learn the new sprite — that probe is the only motion it
+    causes.
+
+    Fails when the cursor cannot be told apart, which is informative in
+    itself: the screen must be still and the background under the pointer
+    uniform for learning to work. Text modes should use read_text_screen
+    and the keyboard instead.
+    """
+    entry = _find_vm(vm)
+    canonical = _canonical(vm, entry)
+    await _ensure_relative_pointer(canonical)
+    sprite, position, learned = await _find_pointer(canonical)
+    return {
+        "guest_coords": list(pointer.hotspot_of(position, sprite)),
+        "sprite_top_left": list(position),
+        "sprite": {
+            "width": sprite.width,
+            "height": sprite.height,
+            "opaque_pixels": sprite.opaque,
+            # The hotspot cannot be read out of the framebuffer; (0,0) is
+            # right for the standard arrow, whose tip is its top-left.
+            "assumed_hotspot": list(sprite.hotspot),
+        },
+        "learned_this_call": learned,
+        "cached_sprites": len(_SPRITES.get(canonical, [])),
+        "gain": [round(g, 3) for g in _GAIN.get(canonical, DEFAULT_GAIN)],
+    }
+
+
 @mcp.tool()
 async def mouse_click(
     vm: str, x: int, y: int, button: str = "left", double: bool = False
@@ -463,13 +698,14 @@ async def mouse_click(
 
     Take a screenshot first and aim on it; coordinates are automatically
     mapped back to guest pixels (screenshots are usually 2x upscaled).
-    The pointer is re-anchored at the top-left corner before every click,
-    so driver drift never accumulates. If clicks land offset (DOS's
-    default driver halves vertical motion), set per-VM factors in the
-    [mouse] table of ~/.vintage-utm-mcp/qmp.toml (y = 2.0 is the usual
-    DOS fix) — verify with a follow-up screenshot. Text-mode screens are
-    better driven from the keyboard: see read_shortcuts and
-    activate_menu, which are exact where pointing is approximate.
+
+    Closed loop in graphics modes: the cursor is found in the framebuffer,
+    moved, and re-measured until it is on target, so the reply says where
+    the pointer really ended up (`on_target`, `residual`) instead of
+    assuming. Guests whose cursor the framebuffer does not carry fall back
+    to dead reckoning and say so in `method`. Text-mode screens are better
+    driven from the keyboard: see read_shortcuts and activate_menu, which
+    are exact where pointing is approximate.
 
     Args:
         vm: VM name or UUID.
@@ -480,19 +716,35 @@ async def mouse_click(
     entry = _find_vm(vm)
     canonical = _canonical(vm, entry)
     mouse.validate_button(button)
-    gx, gy = await _mouse_goto(canonical, x, y)
+    gx, gy = mouse.image_to_guest(x, y, _LAST_SCREEN.get(canonical))
+    result = await _goto(canonical, gx, gy)
     await _click(canonical, button, double)
-    return {
-        "guest_coords": [gx, gy],
-        "button": button,
-        "double": double,
-        "calibration": list(mouse.read_calibration(canonical)),
-        "coordinate_space": (
-            f"last screenshot (scale {_LAST_SCREEN[canonical]['scale']}x)"
-            if canonical in _LAST_SCREEN
-            else "guest-native (no screenshot cached since server start)"
-        ),
-    }
+    return {**result, "button": button, "double": double}
+
+
+async def _goto(vm: str, gx: int, gy: int) -> dict[str, Any]:
+    """Closed-loop move to a guest pixel, falling back to dead reckoning.
+
+    The fallback matters for guests that composite the cursor outside the
+    framebuffer (a hardware cursor plane) or hide it altogether: pointing
+    still works, it is just open-loop and unverified — and the reply says
+    which of the two happened rather than papering over it.
+    """
+    await _ensure_relative_pointer(vm)
+    try:
+        return {"method": "closed-loop", **await _closed_loop_goto(vm, gx, gy)}
+    except pointer.PointerError as exc:
+        gw, gh = _guest_screen(vm)
+        await _mouse_goto_guest(vm, gx, gy, gw, gh)
+        return {
+            "method": "open-loop",
+            "guest_coords": [gx, gy],
+            "requested": [gx, gy],
+            "on_target": None,  # unverifiable without a visible cursor
+            "residual": None,
+            "calibration": list(mouse.read_calibration(vm)),
+            "fallback_reason": str(exc),
+        }
 
 
 @mcp.tool()
@@ -501,18 +753,22 @@ async def mouse_drag(
 ) -> dict[str, Any]:
     """Drag from (x1, y1) to (x2, y2) in the LAST screenshot's pixel space.
 
-    Presses at the start point, walks to the end point in small paced
-    steps (old GUIs need to sample the motion — instant jumps break drag
-    detection), and releases. Calibration errors offset the DROP point,
-    so verify with a screenshot; see mouse_click for the calibration file.
+    The grab point is reached closed-loop and verified before the button
+    goes down — that is the end that has to be exact, since it decides
+    what gets picked up. The travel itself is paced (old GUIs sample the
+    motion; instant jumps break drag detection) and the drop point is
+    measured afterwards when the cursor is still recognisable: dragging
+    often swaps the cursor for an outline or a ghost icon, and `drop` then
+    reports what could actually be verified.
     """
     entry = _find_vm(vm)
     canonical = _canonical(vm, entry)
     mouse.validate_button(button)
-    gx1, gy1 = await _mouse_goto(canonical, x1, y1)
+    gx1, gy1 = mouse.image_to_guest(x1, y1, _LAST_SCREEN.get(canonical))
     gx2, gy2 = mouse.image_to_guest(x2, y2, _LAST_SCREEN.get(canonical))
-    calibration = mouse.read_calibration(canonical)
-    dx, dy = mouse.apply_calibration(gx2 - gx1, gy2 - gy1, calibration)
+    grab = await _goto(canonical, gx1, gy1)
+    gain = _GAIN.get(canonical, DEFAULT_GAIN)
+    dx, dy = pointer.correction((gx2, gy2), (gx1, gy1), gain)
     await _send_input(canonical, _btn(button, True))
     try:
         await asyncio.sleep(0.15)  # let the guest recognize the grab
@@ -520,13 +776,41 @@ async def mouse_drag(
             await _send_input(canonical, _rel(sx, sy))
             await asyncio.sleep(0.018)
         await asyncio.sleep(0.15)  # settle before dropping
+        drop = await _verify_drop(canonical, gx2, gy2)
     finally:
         await _send_input(canonical, _btn(button, False))
     return {
+        "grab": grab,
+        "drop": drop,
         "guest_from": [gx1, gy1],
         "guest_to": [gx2, gy2],
         "button": button,
-        "calibration": list(calibration),
+    }
+
+
+async def _verify_drop(vm: str, gx: int, gy: int) -> dict[str, Any]:
+    """Measure where the pointer sits before the button is released.
+
+    Deliberately does not try to *correct* the position: relearning mid-
+    drag would need a probe move, and moving while the button is down is
+    part of the gesture, not a free diagnostic.
+    """
+    try:
+        found = _locate_known(vm, await _capture(vm))
+    except Exception as exc:  # a capture failure must not swallow the drop
+        return {"verified": False, "reason": str(exc)}
+    if found is None:
+        return {
+            "verified": False,
+            "reason": "cursor not recognisable mid-drag (guests often swap "
+            "it for a drag outline or ghost icon)",
+        }
+    sprite, position = found
+    hotspot = pointer.hotspot_of(position, sprite)
+    return {
+        "verified": True,
+        "guest_coords": list(hotspot),
+        "residual": [gx - hotspot[0], gy - hotspot[1]],
     }
 
 

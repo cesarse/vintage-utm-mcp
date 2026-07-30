@@ -115,8 +115,9 @@ returned by `list_drives`.
 | `send_keys(vm, combo, hold_ms=100)` | Press a chord: "ctrl-alt-delete", "F8", "enter" |
 | `screenshot(vm, delay_ms=0, scale=0)` | PNG of the guest framebuffer; retro resolutions auto-upscaled 2× |
 | `read_text_screen(vm)` | Exact characters of an x86 text-mode screen, read from video memory |
-| `mouse_click(vm, x, y, button=left, double=false)` | Click at last-screenshot coordinates (corner-reset dead reckoning) |
-| `mouse_drag(vm, x1, y1, x2, y2, button=left)` | Drag with paced steps (old GUIs need to sample the motion) |
+| `mouse_locate(vm)` | Where the cursor is, read out of the framebuffer (diagnostic) |
+| `mouse_click(vm, x, y, button=left, double=false)` | Click at last-screenshot coordinates, closed loop; reports `on_target` and the residual |
+| `mouse_drag(vm, x1, y1, x2, y2, button=left)` | Drag: grab point verified before the button goes down, drop measured after |
 | `read_shortcuts(vm)` | Keyboard shortcuts offered by the current text-mode screen: highlighted accelerators + status-bar hints |
 | `activate_menu(vm, menu, item=None)` | Open a menu and pick an item by their own accelerator keys |
 
@@ -136,11 +137,42 @@ scale for you.
 - `stop_vm` defaults to `force` (power-button semantics): DOS-era
   guests do not answer ACPI requests. Stop at an idle `C:\>` prompt and
   mind SMARTDRV's write-behind cache.
-- Mouse motion works over a relative pointer, re-anchored at the
-  top-left corner before every gesture. The reset is sized to the screen
-  and paced — PS/2 carries at most 127 units per packet, so one huge
-  delta leaves a backlog that drains for seconds and swallows everything
-  sent meanwhile (every click then lands at 0,0).
+- Mouse motion works over a relative pointer. Movement is always paced —
+  PS/2 carries at most 127 units per packet, so one huge delta leaves a
+  backlog that drains for seconds and swallows everything sent meanwhile
+  (every click then lands at 0,0).
+- In graphics modes the pointer is **closed loop**: QEMU's `screendump`
+  captures the cursor (Windows 3.11's driver draws it into video memory
+  as an opaque sprite), so the tools find it, move it, and measure it
+  again until it is on target. The sprite is learned once per shape from
+  a single probe move and cached per VM; after that one capture locates
+  it in well under a millisecond. There is no calibration file to tune —
+  the gain is measured from what actually happened. What the guest does,
+  as measured on Windows 3.11 at 640x480:
+  - relative motion is **piecewise, not a single scale factor**: commands
+    of 1 and 2 units move 1 and 2 pixels, 3 moves 6, and everything above
+    stays doubled. Modelling only the doubling strands every odd target
+    one pixel short, because a 1-pixel error divides to a 0-unit command;
+  - the top-left clamp lands at **(0, 1)**, not (0, 0) — the guest cannot
+    put the cursor on row 0, and `mouse_click` reports that as a residual
+    rather than pretending it arrived;
+  - the cursor is drawn **clipped** at the right and bottom edges (it
+    extends down and right from its hotspot). Near a corner only a pixel
+    or two remain on screen; the tools fall back to partial matching and,
+    when too little is left to be sure, say the position is unverified
+    instead of guessing.
+- Learning needs a still screen and uniform background under both probe
+  positions, so it anchors at the top-left corner first — a probe fired
+  from wherever the pointer happened to sit tends to straddle a window
+  border. Things that legitimately break it: a blinking text caret (the
+  Run dialog's caret shows up as a third changed region), an animating
+  guest, or a cursor the framebuffer does not carry at all. Guests in
+  that last category still work; pointing falls back to open-loop dead
+  reckoning and says so in the reply's `method`.
+- The cursor's **hotspot is assumed**, not measured: it cannot be read
+  out of the framebuffer. (0, 0) is right for the standard arrow, whose
+  tip is its top-left corner, but a centred cursor (crosshair, I-beam)
+  would need a different value.
 - Text-mode tools adapt to the screen geometry rather than assuming
   80x25: every call reads the current mode, column count, row count and
   active page from the BIOS Data Area, so 40-column modes, EGA 80x43,
@@ -154,8 +186,7 @@ scale for you.
   positioning approximate at best, and applications hide the pointer
   while you type. `mouse_click` and `mouse_drag` remain for graphics
   modes and GUIs (Windows 3.x, classic Mac OS), where no cell grid
-  exists; they are open-loop and may need the `[mouse]` calibration
-  factors.
+  exists.
 - QEMU accepts a single QMP client per endpoint; the server keeps one
   persistent connection per VM and reconnects after VM restarts.
 
@@ -176,13 +207,21 @@ scale for you.
    validated on MS-DOS EDIT and Turbo Pascal 7; accelerators are revealed
    with Alt when an application hides them, and status-bar hints are
    parsed in all three shapes seen in the wild
-9. `detect_layout` calibration probe: type ambiguous characters, read
+9. ~~Closed-loop pointer for graphics modes: `mouse_locate`, plus
+   `mouse_click`/`mouse_drag` rebuilt on measured feedback~~ — verified on
+   Windows 3.11: the cursor is learned from one probe move and landed on
+   exactly, odd pixels included. Unverified on Mac OS 9.2.2, whose cursor
+   may not reach the framebuffer the same way
+10. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)
-10. Known debt: migrate to MCP SDK 2.x (`mcp.server.fastmcp` was removed
+11. Known debt: migrate to MCP SDK 2.x (`mcp.server.fastmcp` was removed
    in favour of `mcp.server.mcpserver`); the dependency is pinned `<2`
-11. Known debt: media library provenance manifest (name-collision handling
+12. Known debt: media library provenance manifest (name-collision handling
    currently relies on file size, which is blind to fixed-size floppies)
+13. Known debt: the `[mouse]` calibration table is now dead weight for
+   graphics-mode guests that support the closed loop; it still backs the
+   open-loop fallback
 
 ## Tests
 
