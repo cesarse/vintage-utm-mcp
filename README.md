@@ -128,7 +128,23 @@ screenshot** you took, not the guest's. Origin `(0,0)` is the top-left
 corner, x grows right, y grows down. Retro resolutions come back
 upscaled (usually 2×), so a 640×480 guest yields a 1280×960 image and
 its center is around `(640, 480)` — the server divides by the recorded
-scale for you.
+scale for you. The upscale is nearest-neighbour, so guest pixel `k`
+becomes the whole image block `k*scale … k*scale+scale-1` and the mapping
+back floors rather than rounds: every pixel of a block belongs to the
+guest pixel it was drawn from, and the bottom-right pixel of a 2×
+screenshot stays at `(639, 479)` instead of naming a `(640, 480)` that
+does not exist.
+
+Changing the guest's resolution needs nothing from you: every gesture
+re-reads the live framebuffer, so screen bounds, the corner anchor and
+the cursor itself all adapt, and a driver that draws a different cursor
+is simply learned afresh (Windows 3.11's arrow is 12x20 at 640x480 and
+11x20 at 1280x1024). The one thing that does **not** survive a mode
+change is an old screenshot: its scale is baked into the coordinates you
+aimed on. The mouse tools compare the live guest size against the last
+screenshot's and refuse rather than act on a stale mapping — aiming at
+(700, 500) on a stale 2× image lands at (350, 250), and the closed loop
+would report that as on target, because it is on the target it was given.
 
 ## Notes
 

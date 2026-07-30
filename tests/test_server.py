@@ -53,3 +53,28 @@ def test_stage_into_library_rejects_name_collision(tmp_path, monkeypatch) -> Non
     conflicting.write_bytes(b"different content!")
     with pytest.raises(ValueError, match="rename"):
         server._stage_into_library(conflicting)
+
+
+def test_screen_mismatch_accepts_a_matching_screenshot() -> None:
+    # 640x480 guest captured at 2x, and the guest is still 640x480.
+    info = {"width": 1280, "height": 960, "scale": 2}
+    assert server.screen_mismatch(info, 640, 480) is None
+    # From 800 px wide up the screenshot is 1:1.
+    assert server.screen_mismatch({"width": 1280, "height": 1024, "scale": 1},
+                                  1280, 1024) is None
+
+
+def test_screen_mismatch_catches_a_resolution_change() -> None:
+    # Measured: aiming at (700, 500) on a stale 2x image landed the pointer
+    # at (350, 250) and still reported on_target, because it was on the
+    # target it had been given.
+    stale = {"width": 1280, "height": 960, "scale": 2}
+    complaint = server.screen_mismatch(stale, 1280, 1024)
+    assert complaint is not None
+    assert "640x480" in complaint and "1280x1024" in complaint
+
+
+def test_screen_mismatch_says_nothing_without_a_screenshot() -> None:
+    # No screenshot cached yet: coordinates are guest-native, nothing to
+    # contradict.
+    assert server.screen_mismatch(None, 1280, 1024) is None

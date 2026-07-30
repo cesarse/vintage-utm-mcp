@@ -488,6 +488,37 @@ GOTO_MAX_STALLS = 3
 DRAG_REFINE_ATTEMPTS = 6
 
 
+def screen_mismatch(info: dict[str, int] | None, width: int, height: int) -> str | None:
+    """Complain if the guest changed resolution since the last screenshot.
+
+    Mouse coordinates are read in the last screenshot's pixel space, and
+    that space carries a scale — 2x for retro resolutions, 1x from 800
+    pixels wide up. Change the guest's mode and the old scale silently
+    misplaces every click: aiming at (700, 500) on a stale 2x image lands
+    at (350, 250), and the closed loop faithfully reports it as on target,
+    because it is on the target it was given. Better to refuse.
+    """
+    if not info:
+        return None
+    scale = info.get("scale", 1) or 1
+    implied = (info["width"] // scale, info["height"] // scale)
+    if implied == (width, height):
+        return None
+    return (
+        f"the last screenshot was taken of a {implied[0]}x{implied[1]} guest "
+        f"but it is now {width}x{height}, so coordinates aimed on that image "
+        "would land somewhere else entirely; take a fresh screenshot and aim "
+        "on it"
+    )
+
+
+async def _guard_coordinate_space(vm: str) -> None:
+    frame = await _capture(vm)
+    complaint = screen_mismatch(_LAST_SCREEN.get(vm), frame.width, frame.height)
+    if complaint:
+        raise ValueError(complaint)
+
+
 def _measurable(
     position: tuple[int, int], sprite: pointer.Sprite, frame: pointer.Frame
 ) -> bool:
@@ -769,6 +800,7 @@ async def mouse_click(
     entry = _find_vm(vm)
     canonical = _canonical(vm, entry)
     mouse.validate_button(button)
+    await _guard_coordinate_space(canonical)
     gx, gy = mouse.image_to_guest(x, y, _LAST_SCREEN.get(canonical))
     result = await _goto(canonical, gx, gy)
     await _click(canonical, button, double)
@@ -817,6 +849,7 @@ async def mouse_drag(
     entry = _find_vm(vm)
     canonical = _canonical(vm, entry)
     mouse.validate_button(button)
+    await _guard_coordinate_space(canonical)
     gx1, gy1 = mouse.image_to_guest(x1, y1, _LAST_SCREEN.get(canonical))
     gx2, gy2 = mouse.image_to_guest(x2, y2, _LAST_SCREEN.get(canonical))
     grab = await _goto(canonical, gx1, gy1)

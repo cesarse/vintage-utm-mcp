@@ -91,3 +91,21 @@ def test_plan_reset_defaults_without_known_screen() -> None:
     from vintage_utm_mcp.mouse import plan_reset
 
     assert plan_reset(None, None), "must still plan a reset with no screen info"
+
+
+def test_image_to_guest_floors_within_the_upscaled_block() -> None:
+    # A 2x screenshot turns guest pixel k into image pixels 2k and 2k+1,
+    # so both halves of the block must map back to k. Rounding sent the
+    # odd ones to k+1: image x=3 lies in guest pixel 1's block, not 2's.
+    info = {"width": 1280, "height": 960, "scale": 2}
+    assert image_to_guest(0, 0, info) == (0, 0)
+    assert image_to_guest(1, 1, info) == (0, 0)
+    assert image_to_guest(2, 2, info) == (1, 1)
+    assert image_to_guest(3, 3, info) == (1, 1)
+
+
+def test_image_to_guest_keeps_the_last_pixel_on_screen() -> None:
+    # Measured at 640x480: the bottom-right pixel of its 2x screenshot used
+    # to map to (640, 480), one row and column past the end of the guest.
+    info = {"width": 1280, "height": 960, "scale": 2}
+    assert image_to_guest(1279, 959, info) == (639, 479)

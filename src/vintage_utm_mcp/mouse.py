@@ -62,9 +62,15 @@ def image_to_guest(x: int, y: int, screen_info: dict | None) -> tuple[int, int]:
     Screenshots of retro resolutions are upscaled (usually 2x); clicks are
     aimed on that image, so divide by the recorded scale. Without a prior
     screenshot, assume 1:1.
+
+    Floor, not round: the upscale is nearest-neighbour, so guest pixel k
+    becomes the whole image block from k*scale to k*scale+scale-1, and
+    every pixel of that block has to map back to k. Rounding sends the
+    second half of each block to k+1 — and the very last pixel of a 2x
+    screenshot of a 640x480 guest to x=640, a column that does not exist.
     """
     scale = (screen_info or {}).get("scale", 1) or 1
-    return round(x / scale), round(y / scale)
+    return int(x // scale), int(y // scale)
 
 
 def apply_calibration(
