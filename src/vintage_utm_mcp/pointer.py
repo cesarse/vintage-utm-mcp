@@ -19,15 +19,31 @@ find the cursor in a *single* capture by template matching. Every gesture
 reports where the pointer actually ended up, so callers get on_target and
 the residual error instead of a promise.
 
-Empirical notes from the MS-DOS 6.22 VM running Windows 3.11 (640x480):
+Two guests were measured, and they disagree about almost everything except
+the one fact the approach rests on — the cursor is in the framebuffer.
+
+Windows 3.11 (MS-DOS 6.22 VM, 640x480):
 - the arrow is 12x20, 126 opaque pixels: 53 black outline + 73 white fill;
-- learning must happen over a *uniform* background. Over the white
-  Program Manager client area only the 53 black pixels differ from what
-  they covered, and over a busy area (icon labels) the changed set is
-  partial and background-dependent — 63 and 54 pixels in one measurement.
-  Over the plain desktop grey the full 126 show up;
-- the guest scales relative motion by exactly 2.000 on both axes, so a
-  cached gain is a starting estimate the loop then refines.
+- relative motion is piecewise: commands of 1 and 2 units move 1 and 2
+  pixels, 3 moves 6, and everything above stays doubled. Modelling only
+  the doubling strands every odd target one pixel short;
+- the top-left clamp lands at (0, 1): row 0 is unreachable;
+- there is flat background to learn over, and over the plain desktop grey
+  the full 126 pixels show up.
+
+Mac OS 9.2.2 (ppc, 800x600):
+- the arrow is 11x16, 97 opaque pixels — the inverse colouring, black with
+  a white border, and its image starts a pixel above and left of the
+  hotspot, so every edge clips it rather than just the far two;
+- motion is damped, not amplified: roughly 0.6 mid-range, rising past 1.1
+  as the move gets longer, with the leftover fractions accumulated. Single
+  units often move nothing at all, and no single scale factor fits;
+- the desktop is a tiled watermark, so nothing on it is flat and the
+  two-frame learner has no plain region to reason about — hence
+  learn_sprite_sequence.
+
+What generalises: learn where the cursor is drawn whole, never trust a
+gain far from where it was measured, and close in by undershooting.
 """
 
 from __future__ import annotations
@@ -273,6 +289,59 @@ def learn_sprite(
     return sprite, (start_box[0], start_box[1]), (end_box[0], end_box[1])
 
 
+def learn_sprite_sequence(
+    first: Frame,
+    second: Frame,
+    third: Frame,
+    threshold: int = DIFF_THRESHOLD,
+) -> tuple[Sprite, tuple[int, int]]:
+    """Learn a cursor from three frames and two moves in the same direction.
+
+    Assumes nothing about the background, which is what classic Mac OS
+    needs: its desktop is a repeating watermark, so no part of it is flat
+    and the two regions of a single step cannot be told apart by asking
+    which one is plain afterwards.
+
+    The trick is that the cursor's position in `second` is the one region
+    that changed in *both* steps — it gained the sprite in the first and
+    lost it in the second, while the other two regions each move only
+    once. Returns (sprite, its top-left in `second`).
+
+    The mask is whatever the sprite covers that differs from what was
+    underneath, so it is partial by nature. That is enough to find it
+    again: the sprite is opaque, so the pixels it does contribute look the
+    same over any background.
+    """
+    steps = (
+        cluster(changed_points(first, second, threshold)),
+        cluster(changed_points(second, third, threshold)),
+    )
+    for name, blobs in zip(("first", "second"), steps):
+        if len(blobs) != 2:
+            raise PointerError(
+                f"the {name} learning move changed {len(blobs)} regions "
+                "instead of two; the screen has to hold still, and each "
+                "move must be long enough to separate the two images"
+            )
+    boxes = [[bounds(blob) for blob in blobs] for blobs in steps]
+    shared = [
+        (i, j)
+        for i, one in enumerate(boxes[0])
+        for j, two in enumerate(boxes[1])
+        if _overlaps(one, two)
+    ]
+    if len(shared) != 1:
+        raise PointerError(
+            f"the two moves share {len(shared)} regions instead of exactly "
+            "one; both moves must go the same way, far enough that the "
+            "cursor never revisits a position"
+        )
+    index = shared[0][0]
+    box = boxes[0][index]
+    sprite = _sprite_from(second, steps[0][index], box)
+    return sprite, (box[0], box[1])
+
+
 def _is_uniform(frame: Frame, box: tuple[int, int, int, int]) -> bool:
     """Is every pixel in this region the same colour?"""
     x0, y0, width, height = box
@@ -293,6 +362,14 @@ def _overlaps(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> boo
     )
 
 
+#: A cursor pinned against the right or bottom edge is drawn clipped, and
+#: what little remains would be learned as the whole sprite — a 5-pixel
+#: "cursor" measured at the bottom of a Mac OS 9 screen matched roughly
+#: two hundred places at once. Refuse anything too small to be a cursor.
+MIN_SPRITE_PIXELS = 20
+MIN_SPRITE_SIDE = 5
+
+
 def _sprite_from(
     frame: Frame, points: list[tuple[int, int]], box: tuple[int, int, int, int]
 ) -> Sprite:
@@ -300,6 +377,16 @@ def _sprite_from(
     pixels = tuple(
         sorted((x - x0, y - y0, frame.pixel(x, y)) for x, y in points)
     )
+    if (
+        len(pixels) < MIN_SPRITE_PIXELS
+        or width < MIN_SPRITE_SIDE
+        or height < MIN_SPRITE_SIDE
+    ):
+        raise PointerError(
+            f"the cursor came out as {width}x{height} with {len(pixels)} "
+            "pixels, too little to identify — it is most likely clipped "
+            "against a screen edge; learn somewhere it is drawn whole"
+        )
     return Sprite(width=width, height=height, pixels=pixels)
 
 
@@ -415,13 +502,44 @@ def hotspot_of(position: tuple[int, int], sprite: Sprite) -> tuple[int, int]:
 ACCEL_THRESHOLD = 2
 
 
+#: Above this gain the guest is amplifying our motion, and the only way to
+#: land on a specific pixel is its unaccelerated slow regime. Guests that
+#: scale motion *down* (classic Mac OS runs about 0.6 and accumulates the
+#: fractions, so single units often move nothing at all) have no such
+#: regime, and asking them for a 1-pixel step just stalls.
+AMPLIFYING_GAIN = 1.5
+
+#: Within this many pixels of the target the loop stops trusting the gain
+#: and closes in by undershooting instead.
+ENDGAME_PIXELS = 8
+
+
 def _axis_command(error: int, gain: float, threshold: int) -> int:
     if error == 0:
         return 0
-    if abs(error) <= threshold:
-        return error  # below the threshold the guest moves us 1:1
-    command = round(error / (gain or 1.0))
-    if abs(command) <= threshold:
+    scale = gain or 1.0
+    if scale >= AMPLIFYING_GAIN and abs(error) <= threshold:
+        return error  # below the threshold an amplifying guest moves 1:1
+    if abs(error) <= ENDGAME_PIXELS:
+        # Close in, deliberately undershoot. Dividing by a gain estimate
+        # that swings with movement speed — classic Mac OS ranges from 0.5
+        # to 1.5 depending on how far it is asked to go — overshoots the
+        # last pixel and bounces between two positions until the iteration
+        # budget runs out. Never commanding more than the error itself
+        # cannot overshoot, so the approach is monotone: slower in steps,
+        # but it actually arrives.
+        step = max(1, int(abs(error) // max(scale, 1.0)))
+        return step if error > 0 else -step
+    command = round(error / scale)
+    if command == 0:
+        # Never round a real error down to "do nothing" — that is what
+        # stranded every odd pixel when the guest doubled our motion.
+        return 1 if error > 0 else -1
+    if (
+        scale >= AMPLIFYING_GAIN
+        and abs(command) <= threshold
+        and abs(error) > threshold
+    ):
         # A command this small would not be accelerated, so it would move
         # `command` pixels instead of `error`. Step 1:1 by the threshold
         # and let the next iteration close the rest.
@@ -444,6 +562,46 @@ def correction(
     return (
         _axis_command(target[0] - current[0], gain[0], threshold),
         _axis_command(target[1] - current[1], gain[1], threshold),
+    )
+
+
+#: The largest amplification these guests have shown (Windows 3.11 doubles
+#: relative motion). Corrections are shortened so that even at this ratio
+#: the cursor cannot be driven off screen — pinned against an edge it is
+#: drawn clipped and stops being recognisable, which costs the loop its
+#: feedback exactly when it is furthest from the target. Classic Mac OS
+#: makes this essential: its gain rises with speed, so a factor fitted on
+#: small moves badly underestimates a long one and overshoots the border.
+WORST_CASE_GAIN = 2.0
+
+
+def clamp_command(
+    command: tuple[int, int],
+    position: tuple[int, int],
+    sprite: Sprite,
+    width: int,
+    height: int,
+    gain: tuple[float, float],
+) -> tuple[int, int]:
+    """Shorten a command so the cursor stays on screen whatever the gain.
+
+    Costs an extra iteration or two on a long move, which is cheap next to
+    losing sight of the cursor altogether.
+    """
+
+    def axis(cmd: int, pos: int, extent: int, limit: int, scale: float) -> int:
+        if cmd == 0:
+            return 0
+        # Every edge has to be respected, not just the far ones: classic
+        # Mac OS draws its arrow a pixel above and left of the hotspot, so
+        # the top and left borders cut it just as the others do.
+        headroom = max((limit - extent - pos) if cmd > 0 else pos, 0)
+        allowed = max(int(headroom / max(scale, WORST_CASE_GAIN)), 1)
+        return max(-allowed, min(allowed, cmd))
+
+    return (
+        axis(command[0], position[0], sprite.width, width, gain[0]),
+        axis(command[1], position[1], sprite.height, height, gain[1]),
     )
 
 

@@ -1,25 +1,31 @@
-"""Closed-loop pointer, exercised on real Windows 3.11 screens.
+"""Closed-loop pointer, exercised on real retro screens.
 
-Every sprite, colour and hazard below was captured from Windows 3.11
-running in the MS-DOS 6.22 VM at 640x480, not invented: the arrow and
-I-beam are transcribed pixel for pixel out of QMP screendumps, and the
-awkward cases (a blinking caret adding a third changed region, a cursor
-that changes shape, a move too short to separate the two images) are all
-things the guest actually did while this was being built.
+Every sprite, colour and hazard below was captured from a running guest,
+not invented: Windows 3.11 in the MS-DOS 6.22 VM at 640x480, and Mac OS
+9.2.2 on ppc at 800x600. The arrows and the I-beam are transcribed pixel
+for pixel out of QMP screendumps, and the awkward cases are all things a
+guest actually did while this was being built — a blinking caret adding a
+third changed region, a cursor changing shape over a text field, a move
+too short to separate the two images, a desktop with no flat region
+anywhere, and a cursor pinned against an edge coming back as a sliver
+that matched two hundred places at once.
 """
 
 import pytest
 
 from vintage_utm_mcp.pointer import (
     ACCEL_THRESHOLD,
+    ENDGAME_PIXELS,
     Frame,
     PointerError,
     Sprite,
     bounds,
     changed_points,
+    clamp_command,
     cluster,
     correction,
     learn_sprite,
+    learn_sprite_sequence,
     locate,
     locate_all,
     locate_near,
@@ -95,6 +101,29 @@ LABEL = [
     "................#...##..#...#.#...#...#.",
     "................#....#...###...#..#...#.",
     "........................................",
+]
+
+# The Mac OS 9.2.2 arrow, 11x16, 97 opaque pixels: 54 black and 43 white.
+# The inverse of the Windows one — a black arrow with a white border — and
+# its image starts a pixel above and left of the hotspot, so every screen
+# edge clips it, not just the far ones.
+MAC_ARROW = [
+    "OO.........",
+    "O#O........",
+    "O##O.......",
+    "O###O......",
+    "O####O.....",
+    "O#####O....",
+    "O######O...",
+    "O#######O..",
+    "O########O.",
+    "O#####OOOOO",
+    "O##O##O....",
+    "O#O.O##O...",
+    "OO..O##O...",
+    "O....O##O..",
+    ".....O##O..",
+    "......OOO..",
 ]
 
 PALETTE = {"#": BLACK, "O": WHITE, "g": LABEL_GREY}
@@ -347,6 +376,141 @@ def test_visible_match_counts_only_on_screen_pixels(arrow: Sprite) -> None:
     paint(rows, [line[:6] for line in ARROW], 194, 40)
     # 77 of the arrow's 126 pixels live in its first six columns.
     assert visible_match(frame(rows), arrow, 194, 40) == 77
+
+
+def test_mac_arrow_transcription() -> None:
+    glyphs = "".join(MAC_ARROW)
+    assert len(MAC_ARROW) == 16 and all(len(row) == 11 for row in MAC_ARROW)
+    assert glyphs.count("#") == 54
+    assert glyphs.count("O") == 43
+
+
+def _textured(width: int, height: int):
+    """A background with no flat region anywhere, like the Mac OS 9 desktop.
+
+    Uses the real icon-label glyphs, which is the property that matters:
+    nothing on classic Mac OS's watermarked desktop is uniform, so the
+    two-frame learner cannot ask which region went plain afterwards.
+    """
+    rows = canvas(width, height, WHITE)
+    for band in range(0, height - 10, 11):
+        for y, line in enumerate(LABEL):
+            for x, glyph in enumerate(line):
+                if glyph != "." and x < width:
+                    rows[band + y][x] = PALETTE[glyph]
+    return rows
+
+
+def test_learns_over_a_background_with_no_flat_region() -> None:
+    # Three frames, two moves the same way: the cursor's position in the
+    # middle frame is the only region that changed in both steps.
+    def scene(x: int) -> Frame:
+        rows = _textured(200, 120)
+        paint(rows, ARROW, x, 40)
+        return frame(rows)
+
+    sprite, position = learn_sprite_sequence(scene(20), scene(60), scene(100))
+    assert position == (60, 40)
+    # Partial by nature: only the pixels differing from what they covered.
+    assert 0 < sprite.opaque <= 126
+    assert locate(scene(60), sprite) == (60, 40)
+
+
+def test_sequence_learner_locates_over_other_backgrounds() -> None:
+    # A partial mask still matches anywhere, because the sprite is opaque.
+    def scene(x: int) -> Frame:
+        rows = _textured(200, 120)
+        paint(rows, ARROW, x, 40)
+        return frame(rows)
+
+    sprite, _ = learn_sprite_sequence(scene(20), scene(60), scene(100))
+    plain = canvas(200, 120, DESKTOP)
+    paint(plain, ARROW, 77, 22)
+    assert locate(frame(plain), sprite) == (77, 22)
+
+
+def test_sequence_learner_rejects_a_screen_that_moved_elsewhere() -> None:
+    def scene(x: int, caret: bool) -> Frame:
+        rows = canvas(200, 120, DESKTOP)
+        paint(rows, ARROW, x, 40)
+        if caret:
+            for y in range(14):
+                rows[y + 80][150] = BLACK
+        return frame(rows)
+
+    with pytest.raises(PointerError, match="changed 3 regions"):
+        learn_sprite_sequence(scene(20, False), scene(60, True), scene(100, False))
+
+
+def test_sequence_learner_rejects_a_cursor_that_doubles_back() -> None:
+    # Both moves must go the same way; returning to the start leaves two
+    # shared regions and no way to say which frame held the cursor where.
+    def scene(x: int) -> Frame:
+        rows = canvas(200, 120, DESKTOP)
+        paint(rows, ARROW, x, 40)
+        return frame(rows)
+
+    with pytest.raises(PointerError, match="share 2 regions"):
+        learn_sprite_sequence(scene(20), scene(60), scene(20))
+
+
+def test_rejects_a_sprite_too_small_to_identify() -> None:
+    # Measured against the bottom of a Mac OS 9 screen: a cursor pinned
+    # there is drawn as a 3x2 sliver, and that "sprite" matched about two
+    # hundred places at once.
+    def scene(x: int) -> Frame:
+        rows = canvas(200, 120, DESKTOP)
+        paint(rows, ["OO.", "O#O"], x, 40)
+        return frame(rows)
+
+    with pytest.raises(PointerError, match="too little to identify"):
+        learn_sprite_sequence(scene(20), scene(60), scene(100))
+
+
+def test_clamp_leaves_a_move_in_open_space_alone(arrow: Sprite) -> None:
+    assert clamp_command((10, 10), (60, 40), arrow, 640, 480, (2.0, 2.0)) == (10, 10)
+
+
+def test_clamp_shortens_a_move_that_would_leave_the_screen(
+    arrow: Sprite,
+) -> None:
+    # 40 px of headroom at the worst amplification seen (2x) is 20 units.
+    command = clamp_command((500, 0), (588, 40), arrow, 640, 480, (0.6, 0.6))
+    assert command == (20, 0)
+
+
+def test_clamp_uses_the_worst_case_not_the_measured_gain(arrow: Sprite) -> None:
+    # A gain fitted on small moves badly underestimates a long one on
+    # classic Mac OS, so the guard must not trust it.
+    optimistic = clamp_command((500, 0), (588, 40), arrow, 640, 480, (0.5, 0.5))
+    pessimistic = clamp_command((500, 0), (588, 40), arrow, 640, 480, (2.0, 2.0))
+    assert optimistic == pessimistic
+
+
+def test_clamp_always_allows_a_nudge(arrow: Sprite) -> None:
+    # Hard against the edge, still let the loop try: a guest that damps
+    # motion pays out accumulated fractions on a later command.
+    assert clamp_command((5, 5), (628, 460), arrow, 640, 480, (2.0, 2.0)) == (1, 1)
+
+
+def test_clamp_respects_the_near_edges_too(arrow: Sprite) -> None:
+    # The Mac arrow starts above and left of its hotspot, so overshooting
+    # into the top-left clips it exactly like the far edges do.
+    assert clamp_command((-500, -500), (40, 40), arrow, 640, 480, (2.0, 2.0)) == (
+        -20,
+        -20,
+    )
+
+
+def test_endgame_never_overshoots() -> None:
+    # Whatever the guest does with our units, closing in must not sail past
+    # the target — overshoot turns into a bounce between two pixels that
+    # burns the whole iteration budget.
+    for gain in (0.5, 0.6, 1.0, 1.4, 2.0):
+        for error in range(1, ENDGAME_PIXELS + 1):
+            command, _ = correction((error, 0), (0, 0), (gain, gain))
+            assert command >= 1, (gain, error)
+            assert command * min(gain, 1.0) <= error, (gain, error, command)
 
 
 def test_refine_gain_learns_the_doubling() -> None:

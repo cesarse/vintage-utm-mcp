@@ -161,14 +161,33 @@ scale for you.
     or two remain on screen; the tools fall back to partial matching and,
     when too little is left to be sure, say the position is unverified
     instead of guessing.
-- Learning needs a still screen and uniform background under both probe
-  positions, so it anchors at the top-left corner first — a probe fired
-  from wherever the pointer happened to sit tends to straddle a window
-  border. Things that legitimately break it: a blinking text caret (the
-  Run dialog's caret shows up as a third changed region), an animating
-  guest, or a cursor the framebuffer does not carry at all. Guests in
-  that last category still work; pointing falls back to open-loop dead
-  reckoning and says so in the reply's `method`.
+- Classic Mac OS 9.2.2 (ppc, 800x600) was measured too, and agrees on
+  nothing except that the cursor is in the framebuffer:
+  - its arrow is 11x16, 97 pixels, coloured the other way round (black
+    with a white border), and its image starts a pixel **above and left**
+    of the hotspot — so every edge clips it, not just the right and
+    bottom;
+  - motion is **damped, not amplified**: about 0.6 mid-range, rising past
+    1.1 as the move lengthens, with the leftover fractions accumulated.
+    Single units often move nothing at all. No one scale factor fits, so
+    a gain fitted on short moves badly overshoots a long one — which is
+    why corrections are shortened so the cursor can never be driven off
+    screen, and why the last few pixels are closed by undershooting;
+  - its desktop is a **tiled watermark**, so no part of it is flat. The
+    two-frame learner has nothing to reason about there, and a
+    three-frame one takes over: across two moves the same way, the
+    cursor's position in the middle frame is the only region that changed
+    in both steps. That identifies it without knowing what it sits on, at
+    the cost of a partial mask — which still matches anywhere, because
+    the sprite is opaque.
+- Learning anchors at the top-left corner, then steps inward before
+  probing: the corner is deterministic but it is also where a cursor gets
+  cut short, and a sprite learned a row shy reports every later position
+  off by one. Things that legitimately break learning: a blinking text
+  caret (the Run dialog's shows up as a third changed region), an
+  animating guest, or a cursor the framebuffer does not carry at all.
+  Guests in that last category still work; pointing falls back to
+  open-loop dead reckoning and says so in the reply's `method`.
 - The cursor's **hotspot is assumed**, not measured: it cannot be read
   out of the framebuffer. (0, 0) is right for the standard arrow, whose
   tip is its top-left corner, but a centred cursor (crosshair, I-beam)
@@ -208,18 +227,24 @@ scale for you.
    with Alt when an application hides them, and status-bar hints are
    parsed in all three shapes seen in the wild
 9. ~~Closed-loop pointer for graphics modes: `mouse_locate`, plus
-   `mouse_click`/`mouse_drag` rebuilt on measured feedback~~ — verified on
-   Windows 3.11: the cursor is learned from one probe move and landed on
-   exactly, odd pixels included. Unverified on Mac OS 9.2.2, whose cursor
-   may not reach the framebuffer the same way
-10. `detect_layout` calibration probe: type ambiguous characters, read
+   `mouse_click`/`mouse_drag` rebuilt on measured feedback~~ — Windows
+   3.11 lands exactly, odd pixels included, in one or two iterations. Mac
+   OS 9.2.2 is verified working but less precise: it tracks the cursor
+   without losing it and lands exactly on some targets, within a pixel or
+   two on the rest, because its damped, speed-dependent scaling makes the
+   final pixel genuinely hard. Both report the residual rather than
+   claiming success
+10. Sharpen the Mac OS 9 endgame: a per-regime gain (its ratio for short
+   moves is nothing like its ratio for long ones) instead of one estimate
+   that swings between 0.5 and 1.5
+11. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)
-11. Known debt: migrate to MCP SDK 2.x (`mcp.server.fastmcp` was removed
+12. Known debt: migrate to MCP SDK 2.x (`mcp.server.fastmcp` was removed
    in favour of `mcp.server.mcpserver`); the dependency is pinned `<2`
-12. Known debt: media library provenance manifest (name-collision handling
+13. Known debt: media library provenance manifest (name-collision handling
    currently relies on file size, which is blind to fixed-size floppies)
-13. Known debt: the `[mouse]` calibration table is now dead weight for
+14. Known debt: the `[mouse]` calibration table is now dead weight for
    graphics-mode guests that support the closed loop; it still backs the
    open-loop fallback
 

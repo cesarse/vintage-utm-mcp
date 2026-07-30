@@ -468,13 +468,21 @@ _GAIN: dict[str, tuple[float, float]] = {}
 
 #: Learning probes, tried in order from the top-left corner. Sideways
 #: first: the strip along the top of the screen is the likeliest stretch
-#: of flat background, and 16 units clears the cursor's own width whether
-#: the guest accelerates the move (32 px) or not (16 px), so the two
-#: images cannot overlap and merge into one blob.
-LEARN_PROBES = ((16, 0), (0, 16), (24, 24))
+#: of flat background. 40 units has to clear the cursor's own width on
+#: guests that amplify it (Windows 3.11 travels 80 px) and on guests that
+#: damp it (classic Mac OS manages about 24), or the two images touch and
+#: merge into a single blob.
+LEARN_PROBES = ((40, 0), (0, 40), (32, 32))
+#: Stepped inward from the corner anchor before probing, so the cursor is
+#: drawn whole. Small enough to stay near the flat top strip, big enough
+#: to clear the border on guests that damp motion to about 0.6.
+LEARN_MARGIN = (30, 30)
 DEFAULT_GAIN = (1.0, 1.0)
 GOTO_TOLERANCE = 0  # the loop can and does land exactly
-GOTO_MAX_ITERATIONS = 6
+GOTO_MAX_ITERATIONS = 14
+#: Consecutive no-movement commands tolerated before giving up; guests
+#: that damp motion need a few nudges before a fraction rolls over.
+GOTO_MAX_STALLS = 3
 
 
 def _measurable(
@@ -536,20 +544,45 @@ async def _learn(vm: str) -> tuple[pointer.Sprite, tuple[int, int]]:
     """
     frame = await _capture(vm)
     await _corner_reset(vm, frame.width, frame.height)
+    # Step clear of the corner before probing. The anchor is deterministic
+    # but it is also the one place a cursor can be cut short: classic Mac
+    # OS draws its arrow a row above the hotspot, so learning flush against
+    # the top edge loses that row and every position it later reports is
+    # off by one.
+    await _walk(vm, *LEARN_MARGIN)
     errors = []
     for probe in LEARN_PROBES:
         before = await _capture(vm)
         await _walk(vm, *probe)
         after = await _capture(vm)
         try:
-            sprite, _, position = pointer.learn_sprite(before, after)
-        except pointer.PointerError as exc:
-            errors.append(f"probe {probe}: {exc}")
-            await _corner_reset(vm, frame.width, frame.height)
-            continue
+            # Preferred: one move over flat background, which exposes the
+            # whole sprite including any pixels the same colour as its
+            # neighbours.
+            sprite, _, _ = pointer.learn_sprite(before, after)
+        except pointer.PointerError as flat_error:
+            # No flat background to be had — classic Mac OS tiles its
+            # desktop with a watermark, so nothing on it is uniform. A
+            # second move the same way identifies the cursor as the one
+            # region that changed in both steps, whatever it sits on.
+            await _walk(vm, *probe)
+            third = await _capture(vm)
+            try:
+                sprite, _ = pointer.learn_sprite_sequence(before, after, third)
+            except pointer.PointerError as sequence_error:
+                errors.append(f"probe {probe}: {flat_error} / {sequence_error}")
+                await _corner_reset(vm, frame.width, frame.height)
+                continue
         known = _SPRITES.setdefault(vm, [])
         if not any(s == sprite for s in known):
             known.append(sprite)
+        # Both paths learned from frames the cursor has since moved past,
+        # so ask where it is now rather than trusting a stale position.
+        position = pointer.locate(await _capture(vm), sprite)
+        if position is None:
+            errors.append(f"probe {probe}: learned a sprite it cannot find again")
+            await _corner_reset(vm, frame.width, frame.height)
+            continue
         return sprite, position
     raise pointer.PointerError(
         "could not learn the cursor: " + "; then ".join(errors)
@@ -577,10 +610,13 @@ async def _closed_loop_goto(
     every move and the gain is re-estimated from what actually happened.
     """
     sprite, position, learned = await _find_pointer(vm)
+    opening = await _capture(vm)
+    screen_width, screen_height = opening.width, opening.height
     gain = _GAIN.get(vm, DEFAULT_GAIN)
     target = (target_x, target_y)
     iterations = 0
     lost = False
+    stalls = 0
     seen = {position}
     for _ in range(GOTO_MAX_ITERATIONS):
         hotspot = pointer.hotspot_of(position, sprite)
@@ -588,6 +624,9 @@ async def _closed_loop_goto(
         if abs(error[0]) <= GOTO_TOLERANCE and abs(error[1]) <= GOTO_TOLERANCE:
             break
         command = pointer.correction(target, hotspot, gain)
+        command = pointer.clamp_command(
+            command, position, sprite, screen_width, screen_height, gain
+        )
         if command == (0, 0):
             break  # sub-unit error the pointer cannot express
         await _walk(vm, *command)
@@ -617,12 +656,23 @@ async def _closed_loop_goto(
             # the truth (1.667 was seen this way).
             gain = pointer.refine_gain(gain, command, observed)
             _GAIN[vm] = gain
-        position = new_position
-        if position in seen:
-            # Back somewhere we have already been: the guest is rounding
-            # our corrections in a way this loop cannot split, and another
-            # pass would only bounce between the same two pixels.
+        if new_position == position:
+            # No movement at all. Not a dead end: guests that scale motion
+            # down keep the leftover fraction and pay it out on a later
+            # command, so a nudge that seems ignored often lands next time.
+            stalls += 1
+            if stalls > GOTO_MAX_STALLS:
+                break
+            continue
+        stalls = 0
+        if new_position in seen:
+            # Back somewhere we have already been, having genuinely moved:
+            # the guest is rounding our corrections in a way this loop
+            # cannot split, and another pass would only bounce between the
+            # same two pixels.
+            position = new_position
             break
+        position = new_position
         seen.add(position)
     hotspot = pointer.hotspot_of(position, sprite)
     residual = [target[0] - hotspot[0], target[1] - hotspot[1]]
