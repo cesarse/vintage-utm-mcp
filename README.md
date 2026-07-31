@@ -217,6 +217,12 @@ would report that as on target, because it is on the target it was given.
     makes that land on the pixel anyway).
   Either way the drop is measured **after** the button is released, when
   the ordinary cursor is back, and reported as `drop.residual`.
+- Pointing costs what the guest's own scaling costs. Windows 3.11 lands
+  exactly in one or two passes, about 0.4 s a gesture. Classic Mac OS
+  damps motion and banks the remainder, so the last pixel takes a median
+  of seven one-unit nudges and a gesture runs nearer 3 s — exact, but
+  patient. Driving anything long from the keyboard remains far quicker
+  than pointing at it.
 - The cursor's **hotspot is assumed**, not measured: it cannot be read
   out of the framebuffer. (0, 0) is right for the standard arrow, whose
   tip is its top-left corner, but a centred cursor (crosshair, I-beam)
@@ -285,14 +291,19 @@ would report that as on target, because it is on the target it was given.
    so the lifecycle tools need no invalidation, and `check_vm` still
    reads status live (verified: it flipped to `stopped` the moment the VM
    was stopped, while the cached name kept resolving)
-11. Sharpen the Mac OS 9 endgame by **raising the stall tolerance**, not
-   by modelling the gain better. Measured: `GOTO_MAX_STALLS` 3 → 12 took
-   it from 1/4 to 3/4 targets exact with the gain logic untouched. The
-   earlier per-regime-gain theory was wrong — classic Mac OS damps motion
-   to about 0.6 and banks the leftover fraction, so a one-unit command
-   often moves nothing at all and the loop was giving up while the guest
-   still owed it a pixel. Pick the constant deliberately: every tolerated
-   stall costs a capture
+11. ~~Sharpen the Mac OS 9 endgame~~ — by raising the stall tolerance,
+   not by modelling the gain better. Profiling 60 one-unit commands gave
+   the constant: classic Mac OS needs a **median of 7 commands per pixel**
+   and stalls in runs of 5, 6 (six times) and 7 before its banked
+   fraction pays out, so `GOTO_MAX_STALLS = 3` was abandoning moves that
+   were still converging. Raised to 10, with `GOTO_MAX_ITERATIONS` 14 → 24
+   so the endgame can actually finish. Mac OS 9 went **2/6 → 6/6 targets
+   exact, worst error 2 px → 0**, at 2.0 → 2.9 s per gesture; Windows
+   3.11 was unchanged to the millisecond (427 → 428 ms, 5/6 exact) because
+   it lands in one or two passes and never stalls. The tempting shortcut —
+   command 7 units instead of one — does not work: a single 8-unit command
+   moves 4 px where eight 1-unit commands move 1, because the guest
+   accelerates per event rather than scaling a total
 12. Choose the sprite-learning spot by looking at the screen, instead of
    anchoring at the corner and stepping a fixed margin inward. On Mac OS
    9 at 640x480 that margin lands on the menu bar and learns a partial

@@ -485,10 +485,20 @@ LEARN_PROBES = ((40, 0), (0, 40), (32, 32))
 LEARN_MARGIN = (30, 30)
 DEFAULT_GAIN = (1.0, 1.0)
 GOTO_TOLERANCE = 0  # the loop can and does land exactly
-GOTO_MAX_ITERATIONS = 14
-#: Consecutive no-movement commands tolerated before giving up; guests
-#: that damp motion need a few nudges before a fraction rolls over.
-GOTO_MAX_STALLS = 3
+#: Enough passes for the coarse approach plus an endgame that may need
+#: several commands per pixel. Measured on classic Mac OS: a median of 7
+#: one-unit commands buys one pixel, so a two-pixel residual alone can
+#: cost ~14 passes and the old cap of 14 cut the loop off mid-approach.
+GOTO_MAX_ITERATIONS = 24
+#: Consecutive no-movement commands tolerated before giving up. Measured,
+#: not guessed: classic Mac OS damps motion and banks the remainder, and
+#: profiling 60 one-unit commands gave stall runs of 5, 6 (six times) and
+#: 7 before the cursor moved. At 3 the loop abandoned moves that were
+#: still converging; this clears the worst run seen with room to spare.
+#: Each tolerated stall costs a move and a capture (~156 ms), so this is
+#: patience bought at a price, and only damped guests ever spend it —
+#: Windows 3.11 lands in one or two passes and never stalls.
+GOTO_MAX_STALLS = 10
 #: Corrections attempted mid-drag, on guests that keep the cursor visible
 #: while the button is down.
 DRAG_REFINE_ATTEMPTS = 6
