@@ -263,19 +263,55 @@ would report that as on target, because it is on the target it was given.
    two on the rest, because its damped, speed-dependent scaling makes the
    final pixel genuinely hard. Both report the residual rather than
    claiming success
-10. Sharpen the Mac OS 9 endgame: a per-regime gain (its ratio for short
-   moves is nothing like its ratio for long ones) instead of one estimate
-   that swings between 0.5 and 1.5
-11. `detect_layout` calibration probe: type ambiguous characters, read
+10. Cache the `utmctl` VM lookup. Every tool call starts with `_find_vm`,
+   which spawns `utmctl list` — **200 ms**, measured, against 24 ms for a
+   screendump, 17 ms to encode the PNG and 0.15 ms to find the cursor. It
+   is the single largest cost in the whole server and the only one that
+   does not shrink with resolution. Needs care where callers want fresh
+   status (`check_vm`) rather than just the canonical name, and
+   invalidation on the lifecycle tools
+11. Sharpen the Mac OS 9 endgame by **raising the stall tolerance**, not
+   by modelling the gain better. Measured: `GOTO_MAX_STALLS` 3 → 12 took
+   it from 1/4 to 3/4 targets exact with the gain logic untouched. The
+   earlier per-regime-gain theory was wrong — classic Mac OS damps motion
+   to about 0.6 and banks the leftover fraction, so a one-unit command
+   often moves nothing at all and the loop was giving up while the guest
+   still owed it a pixel. Pick the constant deliberately: every tolerated
+   stall costs a capture
+12. Choose the sprite-learning spot by looking at the screen, instead of
+   anchoring at the corner and stepping a fixed margin inward. On Mac OS
+   9 at 640x480 that margin lands on the menu bar and learns a partial
+   mask — 75, 85 and 95 pixels across three runs, against the 97 the
+   cursor really has. It still locates correctly, but `mouse_locate`'s
+   reported sprite size says more about where it learned than about the
+   cursor
+13. Measure or configure the cursor hotspot. It is assumed to be (0, 0),
+   which is right for both guests' arrows but wrong for a centred cursor
+   (I-beam, crosshair) — the offset would show up as a constant aiming
+   error when clicking into text fields
+14. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)
-12. Known debt: migrate to MCP SDK 2.x (`mcp.server.fastmcp` was removed
-   in favour of `mcp.server.mcpserver`); the dependency is pinned `<2`
-13. Known debt: media library provenance manifest (name-collision handling
-   currently relies on file size, which is blind to fixed-size floppies)
-14. Known debt: the `[mouse]` calibration table is now dead weight for
-   graphics-mode guests that support the closed loop; it still backs the
-   open-loop fallback
+15. Migrate to MCP SDK 2.x — now real work rather than a distant note:
+   2.0.0 shipped 2026-07-28 and the dependency is still pinned `<2`. It
+   is a rename, not a removal (`mcp.server.fastmcp.FastMCP` →
+   `mcp.server.mcpserver.MCPServer`, submodules keeping their structure,
+   `@mcp.tool()` unchanged), so it touches five lines in `server.py`;
+   the constructor argument order, transport arguments moving to `run()`
+   and `get_context()` becoming explicit parameters are the parts worth
+   reading the migration guide for
+16. Media library provenance manifest — worse than "debt": a wrong-image
+   bug waiting to happen. `_stage_into_library` treats same name plus
+   same size as the same image, and **every** 1.44 MB floppy is exactly
+   1474560 bytes (both images currently in the library are), so a
+   different `Disk1.img` is silently ignored in favour of the one already
+   staged. Record a digest instead
+17. Retire the `[mouse]` calibration table. The closed loop measures what
+   the config used to declare, and across two guests and four resolution
+   changes the open-loop fallback never once fired — every gesture
+   reported `method: closed-loop`. Keep the fallback for guests whose
+   cursor never reaches the framebuffer, but it can carry a plain default
+   instead of a config table
 
 ## Tests
 
