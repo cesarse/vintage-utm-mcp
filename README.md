@@ -237,6 +237,19 @@ would report that as on target, because it is on the target it was given.
   exists.
 - QEMU accepts a single QMP client per endpoint; the server keeps one
   persistent connection per VM and reconnects after VM restarts.
+- Resolving a VM name is cached for 30 seconds (`utmctl.IDENTITY_TTL`).
+  Only the name/UUID mapping is cached, never a VM's status: nothing
+  `utmctl` can do changes identity, so `start`/`stop`/`suspend` need no
+  invalidation, and `check_vm` always reads status fresh. The one
+  staleness window is a VM renamed in UTM's own interface, which keeps
+  resolving to its old name until the index expires — the symptom is an
+  unreachable QMP endpoint, not a wrong action.
+- When a call takes implausibly long (a *single* screenshot blocking for
+  minutes), suspect an unanswered macOS permission dialog before
+  suspecting the code. QEMU writes screendumps into its own container and
+  the server reads them back, so a folder-access prompt stalls exactly
+  that path, and an unanswered dialog is indistinguishable from a hang.
+  Time a fresh call with a short watchdog to tell the two apart.
 
 ## Roadmap
 
@@ -263,13 +276,15 @@ would report that as on target, because it is on the target it was given.
    two on the rest, because its damped, speed-dependent scaling makes the
    final pixel genuinely hard. Both report the residual rather than
    claiming success
-10. Cache the `utmctl` VM lookup. Every tool call starts with `_find_vm`,
-   which spawns `utmctl list` — **200 ms**, measured, against 24 ms for a
-   screendump, 17 ms to encode the PNG and 0.15 ms to find the cursor. It
-   is the single largest cost in the whole server and the only one that
-   does not shrink with resolution. Needs care where callers want fresh
-   status (`check_vm`) rather than just the canonical name, and
-   invalidation on the lifecycle tools
+10. ~~Cache the `utmctl` VM lookup~~ — every tool call used to spawn
+   `utmctl list` (217 ms median) just to turn a name into the same name.
+   Measured on a clean baseline first, then A/B in one process against
+   the same guest: `screenshot` 253 → **31 ms**, `read_text_screen`
+   232 → **3.4 ms** (it was 98% subprocess overhead). Only the name/UUID
+   index is cached, never status — nothing utmctl does changes identity,
+   so the lifecycle tools need no invalidation, and `check_vm` still
+   reads status live (verified: it flipped to `stopped` the moment the VM
+   was stopped, while the cached name kept resolving)
 11. Sharpen the Mac OS 9 endgame by **raising the stall tolerance**, not
    by modelling the gain better. Measured: `GOTO_MAX_STALLS` 3 → 12 took
    it from 1/4 to 3/4 targets exact with the gain logic untouched. The

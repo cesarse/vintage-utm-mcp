@@ -78,3 +78,16 @@ def test_screen_mismatch_says_nothing_without_a_screenshot() -> None:
     # No screenshot cached yet: coordinates are guest-native, nothing to
     # contradict.
     assert server.screen_mismatch(None, 1280, 1024) is None
+
+
+def test_resolve_passes_an_unknown_vm_through(monkeypatch) -> None:
+    # Unchanged behaviour: an unrecognised name is handed on rather than
+    # rejected here, so the failure surfaces as a QMP error naming the
+    # endpoint it tried.
+    monkeypatch.setattr(server.utmctl, "canonical_name", lambda vm: None)
+    assert server._resolve("Nonexistent VM") == "Nonexistent VM"
+
+
+def test_resolve_maps_a_uuid_to_the_canonical_name(monkeypatch) -> None:
+    monkeypatch.setattr(server.utmctl, "canonical_name", lambda vm: "MS-DOS 6.22")
+    assert server._resolve("12345678-ABCD-4321-9876-ABCDEF012345") == "MS-DOS 6.22"

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import time
 
 _FALLBACK = "/Applications/UTM.app/Contents/MacOS/utmctl"
 
@@ -67,7 +68,54 @@ def parse_list(output: str) -> list[dict[str, str]]:
 
 
 def list_vms() -> list[dict[str, str]]:
+    """Every VM with its current status. Always a fresh subprocess."""
     return parse_list(_run("list"))
+
+
+#: How long a cached name/UUID index may be reused. Only UTM's own
+#: interface can rename, add or remove a VM — nothing utmctl does changes
+#: identity — so this bounds one narrow window: a VM renamed in the GUI
+#: keeps resolving to its old name until the index expires, and the
+#: symptom is a clear "cannot reach QMP" rather than a wrong action.
+IDENTITY_TTL = 30.0
+
+_identity: dict[str, str] = {}
+_identity_read_at = 0.0
+
+
+def _refresh_identity() -> None:
+    global _identity, _identity_read_at
+    index: dict[str, str] = {}
+    for vm in list_vms():
+        index[vm["name"]] = vm["name"]
+        index[vm["uuid"]] = vm["name"]
+    _identity = index
+    _identity_read_at = time.monotonic()
+
+
+def canonical_name(vm: str, *, max_age: float = IDENTITY_TTL) -> str | None:
+    """Resolve a name or UUID to the VM's name, reusing a cached index.
+
+    Returns the name alone, deliberately, and never the whole record:
+    status changes constantly and must not be served from a cache, so the
+    cache is built so that handing back a stale one is impossible rather
+    than merely discouraged.
+
+    `utmctl list` measures ~217 ms — more than a screendump and a PNG
+    encode together — and every tool call used to pay it just to turn a
+    name into the same name. A miss always refreshes, so a VM created
+    moments ago still resolves at once; only hits skip the subprocess.
+    """
+    if time.monotonic() - _identity_read_at <= max_age and vm in _identity:
+        return _identity[vm]
+    _refresh_identity()
+    return _identity.get(vm)
+
+
+def forget_identity() -> None:
+    """Drop the cached index; the next lookup re-reads it."""
+    global _identity_read_at
+    _identity_read_at = 0.0
 
 
 def status(vm: str) -> dict[str, str]:

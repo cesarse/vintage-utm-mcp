@@ -86,6 +86,19 @@ def _canonical(vm: str, entry: dict[str, str] | None) -> str:
     return entry["name"] if entry else vm
 
 
+def _resolve(vm: str) -> str:
+    """Canonical VM name, from utmctl's cached index.
+
+    Every tool except check_vm needs the name and nothing else — the QMP
+    endpoint is derived from it — and asking utmctl afresh each time cost
+    ~217 ms per call, more than the screendump and the PNG encode
+    together. An unknown name passes through unchanged, as it always has,
+    and fails a moment later with a QMP error naming the endpoint it
+    tried.
+    """
+    return utmctl.canonical_name(vm) or vm
+
+
 @mcp.tool()
 async def check_vm(vm: str) -> dict[str, Any]:
     """Diagnose a VM: existence, run status and QMP connectivity.
@@ -233,8 +246,7 @@ async def list_drives(vm: str) -> list[dict[str, Any]]:
     insert_media/eject_media. The 'drive' field is the identifier to pass
     to those tools.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     blocks = await _qmp.execute(canonical, "query-block")
     return qmp.shape_drives(blocks)
 
@@ -257,8 +269,7 @@ async def insert_media(
         image_format: QEMU image format; "raw" (default) covers .img/.ima
             floppies and .iso images.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     path = _resolve_image(image_path)
     library = media_library()
     if library is None or library not in path.parents:
@@ -297,8 +308,7 @@ async def eject_media(vm: str, drive: str, force: bool = False) -> dict[str, Any
         force: eject even if the guest locked the medium. DOS never locks
             floppies, but classic Mac OS locks its media — use force there.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     await _blockdev(canonical, "eject", drive, {"force": force})
     return await _drive_state(canonical, drive)
 
@@ -319,8 +329,7 @@ async def type_text(
             raise it if characters go missing, lower it for bulk typing.
         layout: only "us" for now.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     chords = keyboard.text_to_chords(text, layout=layout)
     hold = max(10, delay_ms // 2)
     for chord in chords:
@@ -347,8 +356,7 @@ async def send_keys(vm: str, combo: str, hold_ms: int = 100) -> dict[str, Any]:
             themselves use "minus" and "equal".
         hold_ms: how long the chord is held before release.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     keys = keyboard.parse_combo(combo)
     await _qmp.execute(
         canonical,
@@ -404,8 +412,7 @@ async def screenshot(vm: str, delay_ms: int = 0, scale: int = 0) -> McpImage:
             typing or a slow redraw).
         scale: 0 = auto (2x when width < 800), or an explicit factor.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     if delay_ms:
         await asyncio.sleep(delay_ms / 1000)
     ppm = await _dump_to_bytes(canonical, "screendump", {}, ".ppm")
@@ -427,8 +434,7 @@ async def read_text_screen(vm: str) -> dict[str, Any]:
     columns, rows, active page). Fails with guidance when the guest is in
     a graphics mode or is not x86 (use screenshot there).
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     bda, text, _ = await _text_screen_state(canonical)
     return {
         "text": text,
@@ -753,8 +759,7 @@ async def mouse_locate(vm: str) -> dict[str, Any]:
     uniform for learning to work. Text modes should use read_text_screen
     and the keyboard instead.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     await _ensure_relative_pointer(canonical)
     sprite, position, learned = await _find_pointer(canonical)
     return {
@@ -797,8 +802,7 @@ async def mouse_click(
         button: "left", "right" or "middle".
         double: double-click.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     mouse.validate_button(button)
     await _guard_coordinate_space(canonical)
     gx, gy = mouse.image_to_guest(x, y, _LAST_SCREEN.get(canonical))
@@ -846,8 +850,7 @@ async def mouse_drag(
     often swaps the cursor for an outline or a ghost icon, and `drop` then
     reports what could actually be verified.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     mouse.validate_button(button)
     await _guard_coordinate_space(canonical)
     gx1, gy1 = mouse.image_to_guest(x1, y1, _LAST_SCREEN.get(canonical))
@@ -1051,8 +1054,7 @@ async def read_shortcuts(vm: str) -> dict[str, Any]:
     Call it again after the screen changes: an open menu advertises a
     different set.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
     bda, text, attrs = await _text_screen_state(canonical)
     return {
         "accelerators": screen.find_accelerators(text, attrs, bda["columns"]),
@@ -1080,8 +1082,7 @@ async def activate_menu(
         item: item to choose once the menu is open, e.g. "Save As".
         settle_ms: pause after opening the menu before reading it back.
     """
-    entry = _find_vm(vm)
-    canonical = _canonical(vm, entry)
+    canonical = _resolve(vm)
 
     def _match(accelerators: list[dict], label: str) -> dict | None:
         wanted = label.strip().lower()
