@@ -330,26 +330,27 @@ would report that as on target, because it is on the target it was given.
 14. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)
-15. Migrate to MCP SDK 2.x — now real work rather than a distant note:
-   2.0.0 shipped 2026-07-28 and the dependency is still pinned `<2`. It
-   is a rename, not a removal (`mcp.server.fastmcp.FastMCP` →
-   `mcp.server.mcpserver.MCPServer`, submodules keeping their structure,
-   `@mcp.tool()` unchanged), so it touches five lines in `server.py`;
-   the constructor argument order, transport arguments moving to `run()`
-   and `get_context()` becoming explicit parameters are the parts worth
-   reading the migration guide for
-16. Media library provenance manifest — worse than "debt": a wrong-image
+15. Media library provenance manifest — worse than "debt": a wrong-image
    bug waiting to happen. `_stage_into_library` treats same name plus
    same size as the same image, and **every** 1.44 MB floppy is exactly
    1474560 bytes (both images currently in the library are), so a
    different `Disk1.img` is silently ignored in favour of the one already
    staged. Record a digest instead
-17. Retire the `[mouse]` calibration table. The closed loop measures what
+16. Retire the `[mouse]` calibration table. The closed loop measures what
    the config used to declare, and across two guests and four resolution
    changes the open-loop fallback never once fired — every gesture
    reported `method: closed-loop`. Keep the fallback for guests whose
    cursor never reaches the framebuffer, but it can carry a plain default
    instead of a config table
+17. Migrate to MCP SDK 2.x — 2.0.0 shipped 2026-07-28 and the dependency
+   is still pinned `<2`. It is a rename, not a removal
+   (`mcp.server.fastmcp.FastMCP` → `mcp.server.mcpserver.MCPServer`,
+   submodules keeping their structure, `@mcp.tool()` unchanged), so it
+   touches five lines in `server.py`; the constructor argument order,
+   transport arguments moving to `run()` and `get_context()` becoming
+   explicit parameters are the parts worth reading the migration guide
+   for. Last because it is the one item that changes no behaviour and
+   buys the guests nothing
 
 ## Tests
 
