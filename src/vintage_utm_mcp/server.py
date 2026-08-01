@@ -581,16 +581,15 @@ def _locate_known(vm: str, frame: pointer.Frame, near: tuple[int, int] | None = 
     return None
 
 
-async def _learn(vm: str) -> tuple[pointer.Sprite, tuple[int, int]]:
-    """Learn the current cursor with a probe move, and cache it.
+async def _bootstrap_sprite(vm: str) -> tuple[pointer.Sprite, tuple[int, int]]:
+    """Learn *a* cursor from the corner anchor — enough to start steering.
 
-    Anchored at the top-left corner first. That costs a long walk, but it
-    is the one position that satisfies every precondition at once: the
-    clamp makes it deterministic, the cursor is drawn whole there (it
-    extends down and right from its hotspot, so only the right and bottom
-    edges clip it), and the strip beside it is usually empty desktop —
-    a probe launched from wherever the pointer happened to be tends to
-    land across a window border and learn a sprite cut short by it.
+    The corner is deterministic without needing to see anything, which is
+    what makes it the right place to start from when no sprite is known
+    yet. What it is not is a good place to *look* at a cursor: it is where
+    guests keep their menu bars and window furniture, so the mask learned
+    here is often a subset of the real sprite. _learn refines it once the
+    pointer can be steered.
     """
     frame = await _capture(vm)
     await _corner_reset(vm, frame.width, frame.height)
@@ -637,6 +636,67 @@ async def _learn(vm: str) -> tuple[pointer.Sprite, tuple[int, int]]:
     raise pointer.PointerError(
         "could not learn the cursor: " + "; then ".join(errors)
     )
+
+
+#: VMs whose sprite is being refined, so the refinement's own pointer
+#: work cannot recurse back into learning.
+_REFINING: set[str] = set()
+
+
+async def _learn(vm: str) -> tuple[pointer.Sprite, tuple[int, int]]:
+    """Learn the cursor, then learn it again somewhere it shows properly.
+
+    Two passes because the two requirements pull apart. Starting needs a
+    position known without sight of the cursor, which only a screen corner
+    gives — and corners are exactly where guests park menu bars and window
+    frames, so the mask learned there is whatever happened to contrast
+    with that furniture. Once a rough sprite exists the pointer can be
+    steered, so the second pass moves somewhere chosen by looking at the
+    screen and learns the cursor properly. Measured: the corner gave 78 of
+    the Windows arrow's 126 pixels and 85 of Mac OS 9's 97.
+
+    The refinement is best-effort. If no clear area exists, or the cursor
+    changes shape on the way, the bootstrap sprite stands — it locates
+    correctly either way, being a subset of the real thing.
+    """
+    sprite, position = await _bootstrap_sprite(vm)
+    if vm in _REFINING:
+        return sprite, position
+    _REFINING.add(vm)
+    try:
+        refined = await _refine_sprite(vm, sprite)
+    except pointer.PointerError:
+        refined = None
+    finally:
+        _REFINING.discard(vm)
+    return refined or (sprite, position)
+
+
+async def _refine_sprite(
+    vm: str, bootstrap: pointer.Sprite
+) -> tuple[pointer.Sprite, tuple[int, int]] | None:
+    """Relearn the cursor over background chosen from the frame."""
+    frame = await _capture(vm)
+    # Room for the cursor at three positions plus the travel between them.
+    span_x = bootstrap.width + 3 * abs(LEARN_PROBES[0][0]) * 2
+    spot = pointer.find_learning_spot(
+        frame, min(span_x, frame.width // 2), bootstrap.height * 3
+    )
+    if spot is None:
+        return None
+    await _closed_loop_goto(vm, *spot)
+    frames = [await _capture(vm)]
+    for _ in range(2):
+        await _walk(vm, *LEARN_PROBES[0])
+        frames.append(await _capture(vm))
+    sprite, _ = pointer.learn_sprite_sequence(*frames)
+    if sprite.opaque <= bootstrap.opaque:
+        return None  # no better than what we had; keep the cheaper answer
+    known = _SPRITES.setdefault(vm, [])
+    if not any(s == sprite for s in known):
+        known.insert(0, sprite)  # try the fuller mask first from now on
+    position = pointer.locate(await _capture(vm), sprite)
+    return (sprite, position) if position else None
 
 
 async def _find_pointer(vm: str) -> tuple[pointer.Sprite, tuple[int, int], bool]:

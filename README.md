@@ -196,10 +196,16 @@ would report that as on target, because it is on the target it was given.
     in both steps. That identifies it without knowing what it sits on, at
     the cost of a partial mask — which still matches anywhere, because
     the sprite is opaque.
-- Learning anchors at the top-left corner, then steps inward before
-  probing: the corner is deterministic but it is also where a cursor gets
-  cut short, and a sprite learned a row shy reports every later position
-  off by one. Things that legitimately break learning: a blinking text
+- Learning runs in two passes. The first anchors at the top-left corner,
+  which is the only position knowable without already being able to see
+  the cursor; the second steers to background chosen from the frame and
+  learns the sprite properly, because corners are where guests keep their
+  menu bars. A mask learned against furniture is a *subset* of the real
+  sprite — it still finds the cursor, and its origin still matches (both
+  guests reported the same position either way), but it is thinner than
+  it needs to be and makes `mouse_locate`'s sprite size say more about
+  where it learned than about the cursor. Things that legitimately break
+  learning: a blinking text
   caret (the Run dialog's shows up as a third changed region), an
   animating guest, or a cursor the framebuffer does not carry at all.
   Guests in that last category still work; pointing falls back to
@@ -304,13 +310,19 @@ would report that as on target, because it is on the target it was given.
    command 7 units instead of one — does not work: a single 8-unit command
    moves 4 px where eight 1-unit commands move 1, because the guest
    accelerates per event rather than scaling a total
-12. Choose the sprite-learning spot by looking at the screen, instead of
-   anchoring at the corner and stepping a fixed margin inward. On Mac OS
-   9 at 640x480 that margin lands on the menu bar and learns a partial
-   mask — 75, 85 and 95 pixels across three runs, against the 97 the
-   cursor really has. It still locates correctly, but `mouse_locate`'s
-   reported sprite size says more about where it learned than about the
-   cursor
+12. ~~Choose the sprite-learning spot by looking at the screen~~ —
+   learning now runs twice, because the two requirements pull apart.
+   Starting needs a position knowable without seeing the cursor, and only
+   a screen corner gives that; corners are also where guests park menu
+   bars and window frames, so the mask learned there is whatever happened
+   to contrast with the furniture. Once a rough sprite exists the pointer
+   can be steered, so a second pass moves to background picked out of the
+   frame — scored by distance from *both* black and white, since a sprite
+   pixel only registers when it differs from what it covers — and learns
+   the cursor properly. Both guests now learn their full sprite:
+   Windows 3.11 **78 → 126 px**, Mac OS 9 **85 → 97 px**. Costs one extra
+   gesture the first time a VM is touched (~1.4 s and ~2.4 s), and is
+   best-effort: with no clear area, the bootstrap mask stands
 13. Measure or configure the cursor hotspot. It is assumed to be (0, 0),
    which is right for both guests' arrows but wrong for a centred cursor
    (I-beam, crosshair) — the offset would show up as a constant aiming

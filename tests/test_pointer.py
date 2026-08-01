@@ -22,8 +22,10 @@ from vintage_utm_mcp.pointer import (
     bounds,
     changed_points,
     clamp_command,
+    contrast_score,
     cluster,
     correction,
+    find_learning_spot,
     learn_sprite,
     learn_sprite_sequence,
     locate,
@@ -525,3 +527,62 @@ def test_refine_gain_ignores_an_axis_clamped_at_the_edge() -> None:
     # The pointer was already against the top edge: it went nowhere
     # vertically, which does not mean the gain is zero.
     assert refine_gain((2.0, 2.0), (40, -40), (80, 0)) == (2.0, 2.0)
+
+
+# --- choosing where to learn ------------------------------------------
+#
+# Background colours read out of the two guests: Windows 3.11's desktop
+# under its 1024-colour driver, and Mac OS 9's at 640x480.
+WIN_DESKTOP = (248, 248, 240)
+MAC_DESKTOP = (210, 221, 248)
+
+
+def test_contrast_score_rejects_both_extremes() -> None:
+    # A white cursor is invisible on white paper and a black outline is
+    # invisible on black; either way half the sprite goes unlearned.
+    assert contrast_score(WHITE) == 0
+    assert contrast_score(BLACK) == 0
+
+
+def test_contrast_score_rates_real_desktops_usable() -> None:
+    # Windows' near-white desktop only just clears the diff threshold —
+    # 15 on the blue channel — which is why learning there still recovered
+    # the arrow's white fill.
+    assert contrast_score(WIN_DESKTOP) == 15
+    assert contrast_score(MAC_DESKTOP) == 45
+    assert contrast_score(DESKTOP) == 63  # the older grey scheme
+
+
+def test_find_learning_spot_avoids_paper_and_ink() -> None:
+    rows = canvas(320, 240, WHITE)
+    for y in range(0, 120):
+        for x in range(0, 320):
+            rows[y][x] = BLACK
+    assert find_learning_spot(frame(rows), 64, 48) is None
+
+
+def test_find_learning_spot_picks_the_clear_area() -> None:
+    # A white document window on the left, plain desktop on the right.
+    rows = canvas(320, 240, MAC_DESKTOP)
+    for y in range(240):
+        for x in range(160):
+            rows[y][x] = WHITE
+    spot = find_learning_spot(frame(rows), 64, 48)
+    assert spot is not None
+    assert spot[0] >= 160, "should have chosen the desktop, not the window"
+
+
+def test_find_learning_spot_keeps_clear_of_furniture() -> None:
+    # A menu bar across the top, like both guests have; the spot must not
+    # sit in it, because that is what cropped the learned masks.
+    rows = canvas(320, 240, MAC_DESKTOP)
+    for y in range(20):
+        for x in range(320):
+            rows[y][x] = WHITE
+    spot = find_learning_spot(frame(rows), 64, 48)
+    assert spot is not None
+    assert spot[1] > 20
+
+
+def test_find_learning_spot_needs_room() -> None:
+    assert find_learning_spot(frame(canvas(40, 40, MAC_DESKTOP)), 200, 200) is None

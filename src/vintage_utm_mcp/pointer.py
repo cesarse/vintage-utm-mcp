@@ -289,6 +289,83 @@ def learn_sprite(
     return sprite, (start_box[0], start_box[1]), (end_box[0], end_box[1])
 
 
+def contrast_score(colour: tuple[int, int, int]) -> int:
+    """How well a cursor would show up against this background colour.
+
+    A sprite pixel is only learned if it differs from what it covers by
+    more than DIFF_THRESHOLD in some channel, so a background is good
+    exactly when it is far from *both* ends of the usual cursor palette.
+    Against pure white the white half of a cursor vanishes; against black
+    the outline does. The score is whichever of the two is worse.
+    """
+    return min(max(colour), 255 - min(colour))
+
+
+def find_learning_spot(
+    frame: Frame,
+    width: int,
+    height: int,
+    cell: int = 16,
+    threshold: int = DIFF_THRESHOLD,
+) -> tuple[int, int] | None:
+    """Centre of the best area to learn a cursor in, or None if there is none.
+
+    Anchoring at a screen corner and stepping a fixed distance inward is
+    cheap but lands wherever the guest happens to keep its furniture — on
+    Mac OS 9 that is the menu bar, and the cursor learned there came back
+    12 pixels short of its real 97. This picks the region that shows a
+    cursor most completely instead: coarse cells scored by how far their
+    colour sits from black and from white, then the window of cells whose
+    worst cell is best.
+    """
+    cols = frame.width // cell
+    rows = frame.height // cell
+    need_x = max(1, -(-width // cell))
+    need_y = max(1, -(-height // cell))
+    if cols < need_x or rows < need_y:
+        return None
+
+    # One score per cell: the worst of a few samples, so a cell holding
+    # any black text or white paper is disqualified along with it.
+    scores = []
+    for row in range(rows):
+        line = []
+        for col in range(cols):
+            worst = 255
+            for dy in (cell // 4, cell // 2, 3 * cell // 4):
+                for dx in (cell // 4, cell // 2, 3 * cell // 4):
+                    worst = min(
+                        worst,
+                        contrast_score(frame.pixel(col * cell + dx, row * cell + dy)),
+                    )
+            line.append(worst)
+        scores.append(line)
+
+    best: tuple[int, tuple[int, int]] | None = None
+    centre = (cols / 2, rows / 2)
+    for row in range(rows - need_y + 1):
+        for col in range(cols - need_x + 1):
+            worst = min(
+                scores[row + dy][col + dx]
+                for dy in range(need_y)
+                for dx in range(need_x)
+            )
+            if worst <= threshold:
+                continue
+            # Among equally clear areas prefer the one nearest the middle:
+            # it is furthest from the edges that clip a cursor.
+            nearness = -(
+                abs(col + need_x / 2 - centre[0]) + abs(row + need_y / 2 - centre[1])
+            )
+            key = (worst, nearness)
+            if best is None or key > best[0]:
+                best = (key, (col, row))
+    if best is None:
+        return None
+    col, row = best[1]
+    return (col * cell + width // 2, row * cell + height // 2)
+
+
 def learn_sprite_sequence(
     first: Frame,
     second: Frame,
