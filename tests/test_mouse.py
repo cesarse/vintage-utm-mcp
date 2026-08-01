@@ -109,3 +109,16 @@ def test_image_to_guest_keeps_the_last_pixel_on_screen() -> None:
     # to map to (640, 480), one row and column past the end of the guest.
     info = {"width": 1280, "height": 960, "scale": 2}
     assert image_to_guest(1279, 959, info) == (639, 479)
+
+
+def test_read_hotspot_override(tmp_path, monkeypatch) -> None:
+    config = tmp_path / "qmp.toml"
+    config.write_text('[hotspot."Mac OS 9.2.2 (ppc)"]\nx = 1\ny = 1\n')
+    monkeypatch.setattr(qmp, "CONFIG_FILE", config)
+    assert mouse.read_hotspot("Mac OS 9.2.2 (ppc)") == (1, 1)
+    assert mouse.read_hotspot("MS-DOS 6.22") is None
+
+
+def test_read_hotspot_without_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(qmp, "CONFIG_FILE", tmp_path / "absent.toml")
+    assert mouse.read_hotspot("anything") is None

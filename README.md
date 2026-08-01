@@ -180,9 +180,12 @@ would report that as on target, because it is on the target it was given.
 - Classic Mac OS 9.2.2 (ppc, 800x600) was measured too, and agrees on
   nothing except that the cursor is in the framebuffer:
   - its arrow is 11x16, 97 pixels, coloured the other way round (black
-    with a white border), and its image starts a pixel **above and left**
-    of the hotspot — so every edge clips it, not just the right and
-    bottom;
+    with a white border), and clamping it into the top-left corner loses
+    its top row where Windows 3.11's arrow keeps all of its — so every
+    edge can clip it, not just the right and bottom. (An earlier note
+    read that as the hotspot sitting a pixel in from the image corner;
+    clicking at a known boundary says otherwise, so treat it as a
+    clamping quirk rather than a hotspot offset.);
   - motion is **damped, not amplified**: about 0.6 mid-range, rising past
     1.1 as the move lengthens, with the leftover fractions accumulated.
     Single units often move nothing at all. No one scale factor fits, so
@@ -229,8 +232,22 @@ would report that as on target, because it is on the target it was given.
   of seven one-unit nudges and a gesture runs nearer 3 s — exact, but
   patient. Driving anything long from the keyboard remains far quicker
   than pointing at it.
-- The cursor's **hotspot is assumed**, not measured: it cannot be read
-  out of the framebuffer. (0, 0) is right for the standard arrow, whose
+- The cursor's **hotspot** cannot be read out of the framebuffer, so it
+  is (0, 0) by default — confirmed on both guests by clicking either side
+  of a boundary whose geometry the framebuffer shows, not by assumption.
+  Override it per VM when a cursor points somewhere other than its own
+  top-left corner:
+
+  ```toml
+  [hotspot."Mac OS 9.2.2 (ppc)"]
+  x = 1
+  y = 1
+  ```
+
+  Beware the tempting shortcut of reading the offset off the screen-edge
+  clamp: it assumes the guest pins the *hotspot* to zero, which holds on
+  Windows 3.11 and does not on Mac OS 9, where it claims (1, 1) and
+  clicking proves otherwise. (0, 0) is right for the standard arrow, whose
   tip is its top-left corner, but a centred cursor (crosshair, I-beam)
   would need a different value.
 - Text-mode tools adapt to the screen geometry rather than assuming
@@ -323,10 +340,17 @@ would report that as on target, because it is on the target it was given.
    Windows 3.11 **78 → 126 px**, Mac OS 9 **85 → 97 px**. Costs one extra
    gesture the first time a VM is touched (~1.4 s and ~2.4 s), and is
    best-effort: with no clear area, the bootstrap mask stands
-13. Measure or configure the cursor hotspot. It is assumed to be (0, 0),
-   which is right for both guests' arrows but wrong for a centred cursor
-   (I-beam, crosshair) — the offset would show up as a constant aiming
-   error when clicking into text fields
+13. ~~Measure or configure the cursor hotspot~~ — it is now *tested*
+   rather than assumed, and (0, 0) survives on both guests. Two methods
+   disagreed and that turned out to be the finding: reading the offset
+   off the screen-edge clamp says (0, 0) for Windows 3.11 but (1, 1) for
+   Mac OS 9, while clicking at a boundary says (0, 0) for both — driving
+   the pointer to row 19 opens Mac's 20-row menu bar and row 20 does not,
+   exactly as a zero offset predicts. Where they disagree the test that
+   measures where clicks *land* wins, so the clamp reading is offered by
+   `measure_hotspot` as a diagnostic and never steers anything. A cursor
+   that really does point somewhere else — a crosshair, an I-beam — can
+   be corrected per VM in a `[hotspot]` config table
 14. `detect_layout` calibration probe: type ambiguous characters, read
    them back from the screen, deduce the guest's active mapping
    (depends on 5)

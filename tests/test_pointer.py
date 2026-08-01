@@ -31,6 +31,7 @@ from vintage_utm_mcp.pointer import (
     locate,
     locate_all,
     locate_near,
+    measure_hotspot,
     refine_gain,
     verify_at,
     visible_match,
@@ -106,9 +107,9 @@ LABEL = [
 ]
 
 # The Mac OS 9.2.2 arrow, 11x16, 97 opaque pixels: 54 black and 43 white.
-# The inverse of the Windows one — a black arrow with a white border — and
-# its image starts a pixel above and left of the hotspot, so every screen
-# edge clips it, not just the far ones.
+# The inverse of the Windows one — a black arrow with a white border.
+# Clamped into the top-left corner it loses its top row, so every screen
+# edge can clip it, not just the far ones.
 MAC_ARROW = [
     "OO.........",
     "O#O........",
@@ -586,3 +587,26 @@ def test_find_learning_spot_keeps_clear_of_furniture() -> None:
 
 def test_find_learning_spot_needs_room() -> None:
     assert find_learning_spot(frame(canvas(40, 40, MAC_DESKTOP)), 200, 200) is None
+
+
+def test_measure_hotspot_reads_the_offset_from_the_clamp(arrow: Sprite) -> None:
+    # An image whose top-left sits at (-1, -1) while the guest holds the
+    # pointer at its minimum means the cursor points one pixel in from its
+    # own corner. This is what the reading *is*; whether the premise holds
+    # on a given guest is another matter — see the note on Mac OS 9.
+    rows = canvas(200, 120, DESKTOP)
+    for dy, line in enumerate(ARROW):
+        for dx, glyph in enumerate(line):
+            if glyph != "." and dx >= 1 and dy >= 1:
+                rows[dy - 1][dx - 1] = PALETTE[glyph]
+    assert measure_hotspot(frame(rows), arrow) == (1, 1)
+
+
+def test_measure_hotspot_reads_zero_for_a_tip_at_the_corner(arrow: Sprite) -> None:
+    assert measure_hotspot(arrow_on_desktop(0, 0), arrow) == (0, 0)
+
+
+def test_measure_hotspot_declines_when_it_cannot_see_the_cursor(
+    arrow: Sprite,
+) -> None:
+    assert measure_hotspot(frame(canvas(200, 120, DESKTOP)), arrow) is None

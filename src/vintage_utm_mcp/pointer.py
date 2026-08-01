@@ -567,6 +567,40 @@ def locate(frame: Frame, sprite: Sprite) -> tuple[int, int] | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def measure_hotspot(
+    frame: Frame,
+    sprite: Sprite,
+    clamp: tuple[int, int] = (0, 0),
+    radius: int = 4,
+) -> tuple[int, int] | None:
+    """Where inside its own image does the cursor actually point?
+
+    Read off the top-left clamp, which costs nothing because learning
+    goes there anyway. The guest pins the *hotspot* to its minimum
+    position, so wherever the image lands relative to that minimum is the
+    hotspot's offset within the image: an image found at (-1, -1) means
+    the cursor points one pixel down and right of its own top corner.
+
+    Measured this way, Windows 3.11's arrow gives (0, 0) — its tip really
+    is its top-left pixel — while Mac OS 9's gives (1, 1), which is also
+    why the Mac sprite loses its top row when clamped and the Windows one
+    does not.
+
+    Assumes the guest's minimum pointer position is `clamp`. Returns None
+    when the clipped cursor cannot be found, which is the honest answer
+    rather than a default that might be wrong.
+    """
+    found = locate_near(
+        frame, sprite, clamp, radius=radius, min_visible=max(8, sprite.opaque // 8)
+    )
+    if found is None:
+        return None
+    offset = (clamp[0] - found[0], clamp[1] - found[1])
+    if not (0 <= offset[0] < sprite.width and 0 <= offset[1] < sprite.height):
+        return None  # nonsense; the match was not the clamped cursor
+    return offset
+
+
 def hotspot_of(position: tuple[int, int], sprite: Sprite) -> tuple[int, int]:
     return position[0] + sprite.hotspot[0], position[1] + sprite.hotspot[1]
 

@@ -106,6 +106,22 @@ def read_calibration(vm: str) -> tuple[float, float]:
     return (float(entry.get("x", 1.0)), float(entry.get("y", 1.0)))
 
 
+def read_hotspot(vm: str) -> tuple[int, int] | None:
+    """Per-VM hotspot override from the [hotspot] table, or None to measure.
+
+        [hotspot."Mac OS 9.2.2 (ppc)"]
+        x = 1
+        y = 1
+    """
+    if not qmp.CONFIG_FILE.exists():
+        return None
+    data = tomllib.loads(qmp.CONFIG_FILE.read_text())
+    entry = data.get("hotspot", {}).get(vm)
+    if not entry:
+        return None
+    return (int(entry.get("x", 0)), int(entry.get("y", 0)))
+
+
 def pick_relative_mouse(mice: list[dict]) -> int | None:
     """Given QMP query-mice output, decide whether to switch pointers.
 

@@ -7,6 +7,7 @@ screen reading.
 """
 
 import asyncio
+import dataclasses
 import shutil
 import subprocess
 import uuid
@@ -665,11 +666,40 @@ async def _learn(vm: str) -> tuple[pointer.Sprite, tuple[int, int]]:
     _REFINING.add(vm)
     try:
         refined = await _refine_sprite(vm, sprite)
+        if refined is not None:
+            sprite, position = refined
+        located = await _apply_hotspot(vm, sprite)
+        if located is not None:
+            sprite, position = located
     except pointer.PointerError:
-        refined = None
+        pass
     finally:
         _REFINING.discard(vm)
-    return refined or (sprite, position)
+    return sprite, position
+
+
+async def _apply_hotspot(
+    vm: str, sprite: pointer.Sprite
+) -> tuple[pointer.Sprite, tuple[int, int]] | None:
+    """Apply a *configured* hotspot, if one is set.
+
+    Only configured — never the clamp measurement, which is offered as a
+    diagnostic by mouse_locate but is not trustworthy enough to steer by.
+    On Mac OS 9 the clamp says (1, 1) while clicking says (0, 0): driving
+    the pointer to row 19 opens the menu bar and row 20 does not, exactly
+    as a zero offset predicts against its 20-row bar. The clamp's premise
+    — that the guest pins the hotspot itself to zero — evidently does not
+    hold there, and where the two disagree the one that measures where
+    clicks actually land wins.
+    """
+    offset = mouse.read_hotspot(vm)
+    if offset is None or offset == sprite.hotspot:
+        return None
+    placed = dataclasses.replace(sprite, hotspot=offset)
+    known = _SPRITES.setdefault(vm, [])
+    _SPRITES[vm] = [placed] + [s for s in known if s.pixels != placed.pixels]
+    position = pointer.locate(await _capture(vm), placed)
+    return (placed, position) if position else None
 
 
 async def _refine_sprite(
@@ -839,8 +869,10 @@ async def mouse_locate(vm: str) -> dict[str, Any]:
             "width": sprite.width,
             "height": sprite.height,
             "opaque_pixels": sprite.opaque,
-            # The hotspot cannot be read out of the framebuffer; (0,0) is
-            # right for the standard arrow, whose tip is its top-left.
+            # Not readable from the framebuffer. (0, 0) is right for both
+            # guests' arrows, confirmed by clicking at a known boundary;
+            # override per VM in the [hotspot] config table if a cursor
+            # points somewhere else.
             "assumed_hotspot": list(sprite.hotspot),
         },
         "learned_this_call": learned,
