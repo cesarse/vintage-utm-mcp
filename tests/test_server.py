@@ -1,6 +1,6 @@
 import pytest
 
-from vintage_utm_mcp import server
+from vintage_utm_mcp import provenance, server
 
 
 def test_resolve_image_explicit_path(tmp_path) -> None:
@@ -33,13 +33,33 @@ def test_stage_into_library_copies(tmp_path, monkeypatch) -> None:
     assert staged.read_bytes() == b"floppy"
 
 
-def test_stage_into_library_reuses_same_size(tmp_path, monkeypatch) -> None:
+def test_stage_into_library_reuses_the_same_image(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(server, "HELPER_DOCUMENTS", tmp_path / "Documents")
     src = tmp_path / "Disk4.img"
     src.write_bytes(b"floppy")
     first = server._stage_into_library(src)
     again = server._stage_into_library(src)
     assert first == again
+
+
+def test_stage_into_library_rejects_a_different_image_of_the_same_size(
+    tmp_path, monkeypatch
+) -> None:
+    # The bug this replaced: staging keyed on name plus size, and every
+    # 1.44 MB floppy is exactly 1474560 bytes — so a different Disk1.img
+    # was silently ignored and the guest booted the one already there.
+    monkeypatch.setattr(server, "HELPER_DOCUMENTS", tmp_path / "Documents")
+    src = tmp_path / "Disk1.img"
+    src.write_bytes(b"A" * 1474560)
+    staged = server._stage_into_library(src)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    impostor = other / "Disk1.img"
+    impostor.write_bytes(b"B" * 1474560)  # same name, same size, not the same
+    assert impostor.stat().st_size == staged.stat().st_size
+    with pytest.raises(ValueError, match="different contents"):
+        server._stage_into_library(impostor)
+    assert staged.read_bytes()[:1] == b"A"  # the original is left alone
 
 
 def test_stage_into_library_rejects_name_collision(tmp_path, monkeypatch) -> None:
@@ -51,8 +71,37 @@ def test_stage_into_library_rejects_name_collision(tmp_path, monkeypatch) -> Non
     other.mkdir()
     conflicting = other / "Disk4.img"
     conflicting.write_bytes(b"different content!")
-    with pytest.raises(ValueError, match="rename"):
+    with pytest.raises(ValueError, match="different contents"):
         server._stage_into_library(conflicting)
+
+
+def test_stage_into_library_records_where_the_image_came_from(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(server, "HELPER_DOCUMENTS", tmp_path / "Documents")
+    src = tmp_path / "Disk4.img"
+    src.write_bytes(b"floppy")
+    server._stage_into_library(src)
+    library = tmp_path / "Documents" / "vintage-utm-mcp"
+    known = provenance.describe(provenance.load(library), "Disk4.img")
+    assert known is not None
+    assert known["source"] == str(src)
+    assert known["digest"] == provenance.digest_file(src)
+
+
+def test_stage_backfills_provenance_for_images_staged_earlier(
+    tmp_path, monkeypatch
+) -> None:
+    # Images already in a library from before the manifest existed still
+    # get an entry the first time they are re-staged.
+    monkeypatch.setattr(server, "HELPER_DOCUMENTS", tmp_path / "Documents")
+    library = tmp_path / "Documents" / "vintage-utm-mcp"
+    library.mkdir(parents=True)
+    (library / "Disk4.img").write_bytes(b"floppy")
+    src = tmp_path / "Disk4.img"
+    src.write_bytes(b"floppy")
+    server._stage_into_library(src)
+    assert provenance.describe(provenance.load(library), "Disk4.img") is not None
 
 
 def test_screen_mismatch_accepts_a_matching_screenshot() -> None:

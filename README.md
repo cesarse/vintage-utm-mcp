@@ -88,6 +88,14 @@ library automatically — an instant copy-on-write APFS clone. Guest
 writes go to the staged copy, not your original. Bare filenames resolve
 against the library directly.
 
+Images are identified by content, not by name and size. Staging a file
+whose name is already taken compares digests: the same image is reused,
+a different one is refused by name. That distinction matters more than
+it sounds — every 1.44 MB floppy image is exactly 1474560 bytes, so size
+cannot tell two of them apart. A `.provenance.json` in the library
+records each image's digest and where it was staged from, and
+`insert_media` reports it back.
+
 Runtime truths worth knowing: `list_drives` (which asks QEMU) is the
 source of truth, not UTM's menu — UTM does not observe out-of-band QMP
 changes, so its UI will not show media mounted by these tools. QMP
@@ -397,12 +405,16 @@ would report that as on target, because it is on the target it was given.
    differences instead of one. Only `us` has a stored signature, because
    a signature copied out of documentation rather than measured on a
    guest would defeat the point
-15. Media library provenance manifest — worse than "debt": a wrong-image
-   bug waiting to happen. `_stage_into_library` treats same name plus
-   same size as the same image, and **every** 1.44 MB floppy is exactly
-   1474560 bytes (both images currently in the library are), so a
-   different `Disk1.img` is silently ignored in favour of the one already
-   staged. Record a digest instead
+15. ~~Media library provenance manifest~~ — staging now compares a
+   digest instead of a size, which was a wrong-image bug rather than
+   debt: **every** 1.44 MB floppy is exactly 1474560 bytes, as both
+   images in the real library are, so a different `Disk1.img` was
+   silently ignored and the guest booted the one already staged. A
+   `.provenance.json` beside the images records each one's digest,
+   size, mtime and where it came from, so a large ISO is not re-read on
+   every insert — but a file changed behind the tool's back is, since
+   the manifest is only trusted while size and mtime still match it.
+   Hashing a floppy costs 2–3 ms
 16. Retire the `[mouse]` calibration table. The closed loop measures what
    the config used to declare, and across two guests and four resolution
    changes the open-loop fallback never once fired — every gesture

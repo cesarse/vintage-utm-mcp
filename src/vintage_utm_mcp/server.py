@@ -17,7 +17,15 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Image as McpImage
 
-from vintage_utm_mcp import keyboard, mouse, pointer, qmp, screen, utmctl
+from vintage_utm_mcp import (
+    keyboard,
+    mouse,
+    pointer,
+    provenance,
+    qmp,
+    screen,
+    utmctl,
+)
 
 mcp = FastMCP("vintage-utm")
 
@@ -207,18 +215,31 @@ def _stage_into_library(path: Path) -> Path:
             "so macOS creates it, then retry"
         )
     target = library / path.name
+    entries = provenance.load(library)
+    incoming = provenance.digest_file(path)
     if target.exists():
-        if target.stat().st_size == path.stat().st_size:
-            return target  # same name and size: assume it's the same image
+        staged = provenance.digest_of_staged(entries, path.name, target)
+        if staged == incoming:
+            if path.name not in entries:  # backfill images staged before this
+                provenance.record(
+                    entries, path.name, digest=staged, staged=target, source=path
+                )
+                provenance.save(library, entries)
+            return target
         raise ValueError(
-            f"a different image named {path.name!r} already exists in the "
-            f"library ({target}); rename one of them"
+            f"a different image named {path.name!r} is already in the library "
+            f"({target}) — same name, different contents (staged "
+            f"{staged[:12]}…, yours {incoming[:12]}…). Rename one of them. "
+            "Size alone cannot tell them apart: every 1.44 MB floppy image is "
+            "exactly 1474560 bytes."
         )
     clone = subprocess.run(
         ["cp", "-c", str(path), str(target)], capture_output=True
     )
     if clone.returncode != 0:  # non-APFS volume or non-macOS: plain copy
         shutil.copy2(path, target)
+    provenance.record(entries, path.name, digest=incoming, staged=target, source=path)
+    provenance.save(library, entries)
     return target
 
 
@@ -296,7 +317,12 @@ async def insert_media(
                 f"{message} — UTM's sandbox cannot read this location; {where}."
             ) from exc
         raise
-    return await _drive_state(canonical, drive)
+    state = await _drive_state(canonical, drive)
+    if library is not None:
+        known = provenance.describe(provenance.load(library), path.name)
+        if known:
+            state["provenance"] = known
+    return state
 
 
 @mcp.tool()
