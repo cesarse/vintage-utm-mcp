@@ -1,6 +1,6 @@
-from vintage_utm_mcp import keyboard
 import pytest
 
+from vintage_utm_mcp import keyboard
 from vintage_utm_mcp.keyboard import (
     KeyboardError,
     parse_combo,
@@ -91,8 +91,8 @@ def test_identifies_an_untouched_dos_guest_as_us() -> None:
 
 
 def test_a_national_driver_stops_matching_us() -> None:
-    # KEYB BR is not US, and saying so is the whole point: type_text
-    # implements US only, so punctuation would come out wrong.
+    # KEYB BR is not US, and saying so is the whole point: nothing here
+    # has a signature for it, so typing would land on the wrong keys.
     ranked = keyboard.identify_layout(BR_UNSHIFTED, BR_SHIFTED)
     assert ranked[0][0] == "us"
     assert ranked[0][1] > 0

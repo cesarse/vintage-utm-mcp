@@ -4,13 +4,18 @@ QMP's send-key takes QEMU key codes ("qcodes"), which name physical keys
 on a US layout. Typing text therefore means translating each character
 into a chord of qcodes (adding shift where needed).
 
-Layout caveat: the translation below assumes the GUEST interprets
-scancodes as US layout — DOS's default. If the guest loaded a national
-driver (e.g. KEYB BR for ABNT2), punctuation comes out wrong while
-letters and digits stay right, which is what makes the problem so easy
-to miss. `detect_layout` presses the keys that move between layouts and
-reads back what the guest produced, so the mismatch shows up before it
-corrupts anything; typing on a non-US mapping is still unimplemented.
+The guest decides what each key position emits, and letters and digits
+survive any Latin layout — so a mismatch stays invisible until
+punctuation comes out wrong. Three mappings are covered:
+
+- "us", the plain one, which DOS uses unless KEYB was loaded;
+- "us-intl", where the apostrophe, quote, backtick, tilde and caret are
+  dead keys that emit nothing and combine with the next character;
+- "mac-option", where Mac OS reaches accents through Option chords and
+  leaves ASCII punctuation alone.
+
+`detect_layout` presses the keys that move between layouts and reads back
+what the guest produced, so a mismatch is found rather than assumed.
 """
 
 from __future__ import annotations

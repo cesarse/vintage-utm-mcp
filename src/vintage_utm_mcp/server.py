@@ -1,9 +1,17 @@
-"""vintage-utm-mcp server.
+"""The MCP tools themselves: lifecycle, media, input, output.
 
-Increment 1: VM lifecycle via utmctl.
-Increment 2: QMP connectivity + check_vm diagnostics.
-Next increments: removable media, keyboard/mouse, screenshot, text-mode
-screen reading.
+Thin by design. Anything worth testing on its own lives in a sibling
+module — utmctl for the CLI, qmp for the socket, screen for video memory,
+keyboard for key mapping, pointer for the closed-loop cursor, mouse for
+the open-loop fallback, provenance for the media library — and the tools
+here compose them and shape the replies.
+
+Two habits run through the tools and are worth knowing before changing
+them. They report what was *measured*, so a gesture that could not be
+verified says so (`on_target: null`) rather than claiming success. And
+they refuse rather than guess: a click whose position is unknown, an
+image whose contents differ from one already staged under that name, or
+coordinates aimed at a screenshot the guest has since resized.
 """
 
 import asyncio
@@ -428,8 +436,9 @@ async def _dump_to_bytes(vm: str, cmd: str, args: dict, suffix: str) -> bytes:
         path.unlink(missing_ok=True)
 
 
-# Last known screen geometry per VM, fed by screenshot(); the mouse tools
-# will need it to map image coordinates back to guest coordinates.
+# Last known screen geometry per VM, fed by screenshot(). The mouse tools
+# map image coordinates back to guest pixels through it, and refuse when
+# the guest has been resized since (see screen_mismatch).
 _LAST_SCREEN: dict[str, dict[str, int]] = {}
 
 
@@ -506,15 +515,18 @@ async def detect_layout(vm: str) -> dict[str, Any]:
     keys that move between layouts and reads back what appeared, so the
     answer comes from the guest rather than from a guess.
 
-    Needs an x86 text-mode screen with a command prompt ready to type at
-    — it types onto the current line and clears it afterwards with Escape,
-    never pressing Enter. Run it at an idle `C:\\>`, not inside an editor.
+    Needs an x86 text-mode screen with a command prompt ready to type at.
+    It types onto the current line and clears up with `cls` — not Escape,
+    which leaves the old text on screen for the next read to pick up — and
+    never presses Enter on what it typed. Run it at an idle `C:\\>`, not
+    inside an editor. Being x86-only it cannot answer for a ppc guest, and
+    says so rather than guessing.
 
-    Reports the character each key produced, the closest known layout and
-    how many keys disagreed with it. A poor match everywhere means a
-    layout that has not been probed before, which is informative in
-    itself: `type_text` only implements US, so anything else will mistype
-    punctuation.
+    Reports the character each key produced, which keys turned out to be
+    dead, the closest known layout and how many keys disagreed with it. A
+    poor match everywhere means a layout nobody has probed yet, which is
+    itself worth knowing: `type_text` covers "us", "us-intl" and
+    "mac-option", and anything outside those will mistype punctuation.
     """
     canonical = _resolve(vm)
     await _text_screen_state(canonical)  # fails clearly outside text mode
@@ -541,8 +553,10 @@ async def detect_layout(vm: str) -> dict[str, Any]:
         "ranking": [{"layout": name, "mismatches": n} for name, n in ranked],
         "type_text_safe": misses == 0 and best == "us",
         "note": (
-            "type_text implements the US layout only; on any other mapping "
-            "letters and digits are still correct but punctuation is not"
+            "type_text covers us, us-intl and mac-option. Letters and "
+            "digits survive any Latin layout, so a mismatch hides until "
+            "punctuation comes out wrong; dead keys are worse still, "
+            "emitting nothing and absorbing the character after them"
         ),
     }
 
@@ -890,7 +904,7 @@ async def _closed_loop_goto(
 ) -> dict[str, Any]:
     """Drive the cursor's hotspot onto a guest pixel, measuring each step.
 
-    No corner reset and no calibration file: the error is observed after
+    No corner reset and nothing to configure: the error is observed after
     every move and the gain is re-estimated from what actually happened.
     """
     sprite, position, learned = await _find_pointer(vm)
