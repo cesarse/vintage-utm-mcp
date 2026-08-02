@@ -5,17 +5,17 @@ done by dead reckoning: anchor the cursor at the top-left corner with a
 huge negative move (the screen edge clamps it deterministically), then
 walk to the target with small relative steps.
 
-Two guest-side effects make the walk imperfect and calibratable:
-- drivers accelerate large deltas; steps are kept small (<= STEP) to stay
-  under the usual thresholds;
-- drivers scale mickeys to pixels per axis (DOS's MOUSE.COM default
-  vertical ratio is half the horizontal one, i.e. it needs y = 2.0).
+Drivers accelerate large deltas, so steps are kept small (<= STEP) to
+stay under the usual thresholds.
 
-Per-VM calibration lives in the [mouse] table of the config file:
-
-    [mouse."MS-DOS 6.22"]
-    x = 1.0
-    y = 2.0
+This module no longer scales the walk. A per-VM [mouse] calibration table
+used to declare how a guest converts mickeys to pixels; the closed loop
+in pointer.py now measures that from what actually happened, and across
+two guests and four resolution changes the open-loop path this module
+serves never once ran. What remains here is the dead-reckoning walk
+itself, kept for guests whose cursor never reaches the framebuffer — and
+for those the honest answer is that the position is unverifiable, not
+that a config knob will fix it.
 """
 
 from __future__ import annotations
@@ -73,12 +73,6 @@ def image_to_guest(x: int, y: int, screen_info: dict | None) -> tuple[int, int]:
     return int(x // scale), int(y // scale)
 
 
-def apply_calibration(
-    dx: int, dy: int, calibration: tuple[float, float]
-) -> tuple[int, int]:
-    return round(dx * calibration[0]), round(dy * calibration[1])
-
-
 def plan_moves(dx: int, dy: int, step: int = STEP) -> list[tuple[int, int]]:
     """Split a movement into steps of at most `step` per axis.
 
@@ -95,15 +89,6 @@ def plan_moves(dx: int, dy: int, step: int = STEP) -> list[tuple[int, int]]:
         moves.append((cx - prev_x, cy - prev_y))
         prev_x, prev_y = cx, cy
     return [m for m in moves if m != (0, 0)]
-
-
-def read_calibration(vm: str) -> tuple[float, float]:
-    """Per-VM (x, y) calibration factors from the config file; (1, 1) if unset."""
-    if not qmp.CONFIG_FILE.exists():
-        return (1.0, 1.0)
-    data = tomllib.loads(qmp.CONFIG_FILE.read_text())
-    entry = data.get("mouse", {}).get(vm, {})
-    return (float(entry.get("x", 1.0)), float(entry.get("y", 1.0)))
 
 
 def read_hotspot(vm: str) -> tuple[int, int] | None:

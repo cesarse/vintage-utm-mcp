@@ -1111,7 +1111,6 @@ async def _goto(vm: str, gx: int, gy: int) -> dict[str, Any]:
             "requested": [gx, gy],
             "on_target": None,  # unverifiable without a visible cursor
             "residual": None,
-            "calibration": list(mouse.read_calibration(vm)),
             "fallback_reason": str(exc),
         }
 
@@ -1263,12 +1262,10 @@ async def _mouse_goto_guest(
 ) -> None:
     """Anchor at the top-left corner, then dead-reckon to guest (gx, gy)."""
     await _ensure_relative_pointer(vm)
-    calibration = mouse.read_calibration(vm)
     # The reset drains before the precise walk: anything sent while a
     # backlog remains is simply added to it.
     await _corner_reset(vm, guest_width or 1024, guest_height or 768)
-    dx, dy = mouse.apply_calibration(gx, gy, calibration)
-    for sx, sy in mouse.plan_moves(dx, dy):
+    for sx, sy in mouse.plan_moves(gx, gy):
         await _send_input(vm, _rel(sx, sy))
         await asyncio.sleep(0.012)
     await asyncio.sleep(0.10)

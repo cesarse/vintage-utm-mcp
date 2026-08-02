@@ -333,7 +333,8 @@ would report that as on target, because it is on the target it was given.
    via BIOS Data Area: mode/columns/rows/page-aware, color and mono)~~
 6. ~~Mouse: `mouse_click`, `mouse_drag`, `mouse_click_text_screen`
    (relative pointer + per-VM calibration in the `[mouse]` config
-   table; DOS usually needs y = 2.0)~~
+   table; DOS usually needs y = 2.0)~~ — the `[mouse]` table was later
+   removed in 16; the closed loop measures the scaling instead
 7. ~~Closed-loop text-mode pointer~~ — built, measured, then dropped:
    keyboard accelerators are exact where pointing is approximate
 8. ~~Keyboard-first text mode: `read_shortcuts`, `activate_menu`~~ —
@@ -415,12 +416,15 @@ would report that as on target, because it is on the target it was given.
    every insert — but a file changed behind the tool's back is, since
    the manifest is only trusted while size and mtime still match it.
    Hashing a floppy costs 2–3 ms
-16. Retire the `[mouse]` calibration table. The closed loop measures what
-   the config used to declare, and across two guests and four resolution
-   changes the open-loop fallback never once fired — every gesture
-   reported `method: closed-loop`. Keep the fallback for guests whose
-   cursor never reaches the framebuffer, but it can carry a plain default
-   instead of a config table
+16. ~~Retire the `[mouse]` calibration table~~ — gone, along with
+   `read_calibration`, `apply_calibration` and the `calibration` field
+   the open-loop fallback used to report. The closed loop measures what
+   the table used to declare, and across two guests and four resolution
+   changes the fallback never once fired. The dead-reckoning walk stays
+   for guests whose cursor never reaches the framebuffer, but it no
+   longer pretends a config knob can fix an unverifiable position — it
+   reports `on_target: null` and says why. `~/.vintage-utm-mcp/qmp.toml`
+   now carries only `[vms]` endpoints and the `[hotspot]` override
 17. Migrate to MCP SDK 2.x — 2.0.0 shipped 2026-07-28 and the dependency
    is still pinned `<2`. It is a rename, not a removal
    (`mcp.server.fastmcp.FastMCP` → `mcp.server.mcpserver.MCPServer`,

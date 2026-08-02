@@ -3,10 +3,8 @@ import pytest
 from vintage_utm_mcp import mouse, qmp
 from vintage_utm_mcp.mouse import (
     MouseError,
-    apply_calibration,
     image_to_guest,
     plan_moves,
-    read_calibration,
     validate_button,
 )
 
@@ -27,24 +25,6 @@ def test_image_to_guest_divides_by_scale() -> None:
     info = {"width": 1280, "height": 960, "scale": 2}
     assert image_to_guest(640, 480, info) == (320, 240)
     assert image_to_guest(640, 480, None) == (640, 480)  # no screenshot yet
-
-
-def test_apply_calibration_rounds() -> None:
-    assert apply_calibration(100, 100, (1.0, 2.0)) == (100, 200)
-    assert apply_calibration(33, 33, (1.5, 1.0)) == (50, 33)
-
-
-def test_read_calibration_from_config(tmp_path, monkeypatch) -> None:
-    config = tmp_path / "qmp.toml"
-    config.write_text('[mouse."MS-DOS 6.22"]\nx = 1.0\ny = 2.0\n')
-    monkeypatch.setattr(qmp, "CONFIG_FILE", config)
-    assert read_calibration("MS-DOS 6.22") == (1.0, 2.0)
-    assert read_calibration("Mac OS 9.2.2 (ppc)") == (1.0, 1.0)
-
-
-def test_read_calibration_without_config(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(qmp, "CONFIG_FILE", tmp_path / "absent.toml")
-    assert read_calibration("anything") == (1.0, 1.0)
 
 
 def test_validate_button() -> None:
