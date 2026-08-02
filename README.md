@@ -111,12 +111,13 @@ returned by `list_drives`.
 | `list_drives(vm)` | Block devices, removable first |
 | `insert_media(vm, drive, image_path, image_format=raw)` | Insert an image while running |
 | `eject_media(vm, drive, force=false)` | Eject; `force` for guests that lock media (classic Mac OS) |
-| `type_text(vm, text, delay_ms=60, layout=us)` | Type text as raw keystrokes (US layout) |
+| `type_text(vm, text, delay_ms=60, layout=us)` | Type text as raw keystrokes; `us-intl` for dead-key guests, `mac-option` for Mac accents |
 | `send_keys(vm, combo, hold_ms=100)` | Press a chord: "ctrl-alt-delete", "F8", "enter" |
 | `screenshot(vm, delay_ms=0, scale=0)` | PNG of the guest framebuffer; retro resolutions auto-upscaled 2× |
 | `read_text_screen(vm)` | Exact characters of an x86 text-mode screen, read from video memory |
+| `detect_layout(vm)` | Press the keys that move between keyboard layouts and read back what the guest produced |
 | `mouse_locate(vm)` | Where the cursor is, read out of the framebuffer (diagnostic) |
-| `mouse_click(vm, x, y, button=left, double=false)` | Click at last-screenshot coordinates, closed loop; reports `on_target` and the residual |
+| `mouse_click(vm, x, y, button=left, double=false, allow_unverified=false)` | Click at last-screenshot coordinates, closed loop; refuses if it lost the cursor |
 | `mouse_drag(vm, x1, y1, x2, y2, button=left)` | Drag: grab verified before the button goes down, drop steered and measured |
 | `read_shortcuts(vm)` | Keyboard shortcuts offered by the current text-mode screen: highlighted accelerators + status-bar hints |
 | `activate_menu(vm, menu, item=None)` | Open a menu and pick an item by their own accelerator keys |
@@ -232,6 +233,15 @@ would report that as on target, because it is on the target it was given.
   of seven one-unit nudges and a gesture runs nearer 3 s — exact, but
   patient. Driving anything long from the keyboard remains far quicker
   than pointing at it.
+- `mouse_click` and `mouse_drag` **refuse to act when the loop lost the
+  cursor** — a shape change over the target is the usual cause, and the
+  position they would report is the last one actually measured, not where
+  the pointer is now. Clicking there is a click somewhere unknown; a drag
+  is worse, since the button goes down and takes whatever is under it. A
+  verified-but-inexact landing still clicks: being a pixel out hits the
+  button you aimed at. Pass `allow_unverified=true` to override, and note
+  that the open-loop fallback is unaffected, since it never claimed to
+  know where the cursor was.
 - The cursor's **hotspot** cannot be read out of the framebuffer, so it
   is (0, 0) by default — confirmed on both guests by clicking either side
   of a boundary whose geometry the framebuffer shows, not by assumption.
@@ -250,6 +260,31 @@ would report that as on target, because it is on the target it was given.
   clicking proves otherwise. (0, 0) is right for the standard arrow, whose
   tip is its top-left corner, but a centred cursor (crosshair, I-beam)
   would need a different value.
+- **Mac guests reach accents without any dead-key layout**, because Mac
+  OS puts them on Option chords that exist on the plain U.S. layout too:
+  `type_text(..., layout="mac-option")` sends `option-e` then `a` for á,
+  `option-n` then `o` for õ, and `option-c` for ç — measured on Mac OS
+  9.2.2, and worth measuring, because `option-e` then `c` gives `´c`
+  rather than `ç`. For a Mac you are automating this is the better
+  arrangement: leave the guest on plain U.S. so `us` types ASCII exactly,
+  and reach for `mac-option` when you need the accents.
+- **US-International** guests need `type_text(..., layout="us-intl")`.
+  Windows 3.11 uses it whenever `SYSTEM.INI` has
+  `keyboard.dll=kbdusx.dll` — as this project's own guest does. There the
+  apostrophe, quote, backtick, tilde and caret are dead: they emit
+  nothing alone and combine with whatever follows. The failure is narrow
+  enough to be treacherous — measured on a dead-key guest, `O'Neil` types
+  correctly because acute has no form for N, while `d'agua` comes out
+  `dágua`. The `us-intl` layout sends a space after each accent to commit
+  it, and composes the accented characters plain US cannot reach at all
+  (`ç` is acute then c).
+- `send-key` names keys by where they sit on a **US** board; the guest
+  decides what character that position emits, and `type_text` implements
+  US only. Letters and digits survive any Latin layout, so a national
+  driver hides itself until punctuation comes out wrong — run
+  `detect_layout` at an idle prompt to find out before it bites. It needs
+  an x86 text-mode screen, types onto the current line and clears it
+  afterwards, and never presses Enter.
 - Text-mode tools adapt to the screen geometry rather than assuming
   80x25: every call reads the current mode, column count, row count and
   active page from the BIOS Data Area, so 40-column modes, EGA 80x43,
@@ -351,9 +386,17 @@ would report that as on target, because it is on the target it was given.
    `measure_hotspot` as a diagnostic and never steers anything. A cursor
    that really does point somewhere else — a crosshair, an I-beam — can
    be corrected per VM in a `[hotspot]` config table
-14. `detect_layout` calibration probe: type ambiguous characters, read
-   them back from the screen, deduce the guest's active mapping
-   (depends on 5)
+14. ~~`detect_layout` calibration probe~~ — presses the keys that move
+   between layouts and reads back what the guest actually produced, so
+   the answer comes from the guest instead of a guess. Verified both
+   ways on MS-DOS 6.22: untouched it reports `us` with zero mismatches,
+   and after `KEYB BR` it stops matching and names the two keys that went
+   dead (ABNT2's acute and grave accents emit nothing until the next
+   keystroke). Results are per key, not a joined string — a dead key
+   would otherwise shift every character after it and look like a dozen
+   differences instead of one. Only `us` has a stored signature, because
+   a signature copied out of documentation rather than measured on a
+   guest would defeat the point
 15. Media library provenance manifest — worse than "debt": a wrong-image
    bug waiting to happen. `_stage_into_library` treats same name plus
    same size as the same image, and **every** 1.44 MB floppy is exactly

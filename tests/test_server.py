@@ -91,3 +91,32 @@ def test_resolve_passes_an_unknown_vm_through(monkeypatch) -> None:
 def test_resolve_maps_a_uuid_to_the_canonical_name(monkeypatch) -> None:
     monkeypatch.setattr(server.utmctl, "canonical_name", lambda vm: "MS-DOS 6.22")
     assert server._resolve("12345678-ABCD-4321-9876-ABCDEF012345") == "MS-DOS 6.22"
+
+
+def test_unverified_click_allows_a_measured_position() -> None:
+    assert server.unverified_click({"verified": True, "on_target": True}) is None
+
+
+def test_unverified_click_allows_a_near_miss() -> None:
+    # Being a pixel out still hits the button aimed at; only a lost
+    # cursor means the position is unknown.
+    assert (
+        server.unverified_click(
+            {"verified": True, "on_target": False, "residual": [1, 0]}
+        )
+        is None
+    )
+
+
+def test_unverified_click_allows_the_open_loop_fallback() -> None:
+    # Open loop never claims to know; refusing there would disable
+    # pointing on guests whose cursor is not in the framebuffer.
+    assert server.unverified_click({"method": "open-loop", "on_target": None}) is None
+
+
+def test_unverified_click_refuses_a_lost_cursor() -> None:
+    problem = server.unverified_click(
+        {"verified": False, "guest_coords": [70, 31], "lost_reason": "changed shape"}
+    )
+    assert problem is not None
+    assert "changed shape" in problem and "[70, 31]" in problem

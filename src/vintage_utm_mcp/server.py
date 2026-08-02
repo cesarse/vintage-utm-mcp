@@ -322,13 +322,22 @@ async def type_text(
 
     Args:
         vm: VM name or UUID.
-        text: text to type; "\\n" presses Enter. Injected as US-layout
-            keystrokes: keep the guest on its default US mapping (in DOS,
-            don't load KEYB) or punctuation will come out wrong.
+        text: text to type; "\\n" presses Enter. Injected as keystrokes
+            for the chosen layout — the guest decides what each key
+            position emits, so a mismatch garbles punctuation while
+            leaving letters and digits looking fine. Run detect_layout if
+            unsure.
         delay_ms: pause between characters. The default 60 is safe for
             DOS-era guests, which drop keys during disk I/O if flooded;
             raise it if characters go missing, lower it for bulk typing.
-        layout: only "us" for now.
+        layout: "us" (default) or "us-intl". Pick "us-intl" when the guest
+            uses US-International — Windows 3.11 does whenever SYSTEM.INI
+            says `keyboard.dll=kbdusx.dll`. There the apostrophe, quote,
+            backtick, tilde and caret are dead keys: typed plainly they
+            emit nothing and swallow the character after them, so an
+            apostrophe is sent as accent-then-space. It also unlocks
+            accented characters, which the plain US layout cannot type at
+            all — "ç" goes out as acute then c.
     """
     canonical = _resolve(vm)
     chords = keyboard.text_to_chords(text, layout=layout)
@@ -343,7 +352,7 @@ async def type_text(
             },
         )
         await asyncio.sleep(delay_ms / 1000)
-    return {"typed_chars": len(chords)}
+    return {"characters": len(text), "keystrokes": len(chords), "layout": layout}
 
 
 @mcp.tool()
@@ -443,6 +452,115 @@ async def read_text_screen(vm: str) -> dict[str, Any]:
         "rows": bda["rows"],
         "mode": bda["mode"],
     }
+
+
+async def _press(vm: str, keys: list[str], hold_ms: int = 100) -> None:
+    await _qmp.execute(
+        vm,
+        "send-key",
+        {"keys": [{"type": "qcode", "data": k} for k in keys], "hold-time": hold_ms},
+    )
+
+
+async def _current_input_line(vm: str) -> str:
+    """Whatever has been typed after the last prompt on a text screen."""
+    _, text, _ = await _text_screen_state(vm)
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+@mcp.tool()
+async def detect_layout(vm: str) -> dict[str, Any]:
+    """Work out which keyboard layout the guest is actually using.
+
+    `send-key` names keys by where they sit on a US board, but the guest
+    decides what character each position emits — load a national driver
+    (DOS's KEYB) and punctuation comes out somewhere else entirely, while
+    letters and digits look fine and hide the problem. This presses the
+    keys that move between layouts and reads back what appeared, so the
+    answer comes from the guest rather than from a guess.
+
+    Needs an x86 text-mode screen with a command prompt ready to type at
+    — it types onto the current line and clears it afterwards with Escape,
+    never pressing Enter. Run it at an idle `C:\\>`, not inside an editor.
+
+    Reports the character each key produced, the closest known layout and
+    how many keys disagreed with it. A poor match everywhere means a
+    layout that has not been probed before, which is informative in
+    itself: `type_text` only implements US, so anything else will mistype
+    punctuation.
+    """
+    canonical = _resolve(vm)
+    await _text_screen_state(canonical)  # fails clearly outside text mode
+    observed: dict[str, list[str]] = {}
+    for shift in (False, True):
+        baseline = await _fresh_prompt(canonical)
+        produced: list[str] = []
+        for key in keyboard.PROBE_KEYS:
+            produced.append(
+                await _probe_key(canonical, key, shift, baseline + "".join(produced))
+            )
+        observed["shifted" if shift else "unshifted"] = produced
+    await _fresh_prompt(canonical)
+    ranked = keyboard.identify_layout(observed["unshifted"], observed["shifted"])
+    best, misses = ranked[0]
+    return {
+        "keys": list(keyboard.PROBE_KEYS),
+        "unshifted": observed["unshifted"],
+        "shifted": observed["shifted"],
+        "dead_keys": keyboard.dead_keys(observed["unshifted"], observed["shifted"]),
+        "layout": best if misses == 0 else None,
+        "closest": best,
+        "mismatches": misses,
+        "ranking": [{"layout": name, "mismatches": n} for name, n in ranked],
+        "type_text_safe": misses == 0 and best == "us",
+        "note": (
+            "type_text implements the US layout only; on any other mapping "
+            "letters and digits are still correct but punctuation is not"
+        ),
+    }
+
+
+async def _fresh_prompt(vm: str) -> str:
+    """Abandon the current line and clear the screen; return the prompt.
+
+    Escape alone is not enough: DOS answers it with a backslash and drops
+    to a continuation line without printing a new prompt, so the last
+    line on screen is still the old one and every length comparison after
+    it is measured against the wrong baseline. `cls` gives a clean screen
+    and a real prompt — and c, l and s are letters, which sit in the same
+    place on every layout this probe might meet.
+    """
+    await _press(vm, ["esc"])
+    await asyncio.sleep(0.2)
+    for key in ("c", "l", "s"):
+        await _press(vm, [key])
+        await asyncio.sleep(0.12)
+    await _press(vm, ["ret"])
+    await asyncio.sleep(0.9)
+    return await _current_input_line(vm)
+
+
+async def _probe_key(vm: str, key: str, shift: bool, so_far: str) -> str:
+    """Press one key and return the character it added, or '' if none.
+
+    One key at a time, each confirmed against the line it produced. A
+    long run of chords quietly loses its tail — sending all seventeen
+    shifted keys in a row reliably dropped the last few — and a probe
+    that silently reads back less than it typed would invent a layout
+    difference that is not there.
+    """
+    chord = (["shift"] if shift else []) + [key]
+    await _press(vm, chord)
+    # Poll for the echo; never press again. Retrying the *press* was the
+    # first attempt and it typed several keys twice — the guest had taken
+    # them, it just had not drawn them yet.
+    for _ in range(8):
+        await asyncio.sleep(0.12)
+        line = await _current_input_line(vm)
+        if len(line) > len(so_far):
+            return line[len(so_far):]
+    return ""  # dead key, or the guest swallowed it
 
 
 async def _send_input(vm: str, events: list[dict]) -> None:
@@ -883,7 +1001,12 @@ async def mouse_locate(vm: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def mouse_click(
-    vm: str, x: int, y: int, button: str = "left", double: bool = False
+    vm: str,
+    x: int,
+    y: int,
+    button: str = "left",
+    double: bool = False,
+    allow_unverified: bool = False,
 ) -> dict[str, Any]:
     """Click at (x, y) in the LAST screenshot's pixel space.
 
@@ -909,8 +1032,37 @@ async def mouse_click(
     await _guard_coordinate_space(canonical)
     gx, gy = mouse.image_to_guest(x, y, _LAST_SCREEN.get(canonical))
     result = await _goto(canonical, gx, gy)
+    problem = unverified_click(result)
+    if problem and not allow_unverified:
+        raise ValueError(problem)
     await _click(canonical, button, double)
     return {**result, "button": button, "double": double}
+
+
+def unverified_click(result: dict[str, Any]) -> str | None:
+    """Why clicking at this position would be unsafe, or None if it is fine.
+
+    Only the closed loop can lose track of the cursor mid-gesture — a
+    shape change over the target is the usual cause — and when it does,
+    the position it reports is the last one it actually measured, not
+    where the pointer is now. Pressing a button there is a click at an
+    unknown place, which is a worse outcome than not clicking at all.
+
+    A verified-but-inexact landing is fine: being a pixel out still hits
+    the button you aimed at. So this refuses only on lost, not on
+    on_target. The open-loop fallback never claims to know where the
+    cursor is, and is left alone — refusing there would disable pointing
+    entirely on guests whose cursor the framebuffer does not carry.
+    """
+    if result.get("verified") is not False:
+        return None
+    return (
+        "refusing to click: the cursor was lost during the move, so its "
+        f"position is unknown — {result.get('lost_reason', 'no reason given')}. "
+        f"Last measured at {result.get('guest_coords')}. Take a screenshot "
+        "to see what the pointer turned into, or pass allow_unverified=True "
+        "to click there regardless."
+    )
 
 
 async def _goto(vm: str, gx: int, gy: int) -> dict[str, Any]:
@@ -940,7 +1092,13 @@ async def _goto(vm: str, gx: int, gy: int) -> dict[str, Any]:
 
 @mcp.tool()
 async def mouse_drag(
-    vm: str, x1: int, y1: int, x2: int, y2: int, button: str = "left"
+    vm: str,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    button: str = "left",
+    allow_unverified: bool = False,
 ) -> dict[str, Any]:
     """Drag from (x1, y1) to (x2, y2) in the LAST screenshot's pixel space.
 
@@ -958,6 +1116,11 @@ async def mouse_drag(
     gx1, gy1 = mouse.image_to_guest(x1, y1, _LAST_SCREEN.get(canonical))
     gx2, gy2 = mouse.image_to_guest(x2, y2, _LAST_SCREEN.get(canonical))
     grab = await _goto(canonical, gx1, gy1)
+    problem = unverified_click(grab)
+    if problem and not allow_unverified:
+        # Worse than a stray click: the button goes down and whatever is
+        # under it gets dragged somewhere else.
+        raise ValueError(problem)
     gain = _GAIN.get(canonical, DEFAULT_GAIN)
     dx, dy = pointer.correction((gx2, gy2), (gx1, gy1), gain)
     await _send_input(canonical, _btn(button, True))
