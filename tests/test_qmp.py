@@ -1,7 +1,13 @@
 import asyncio
 import json
 
-from vintage_utm_mcp.qmp import QmpManager, default_port, parse_address, slugify
+from vintage_utm_mcp.qmp import (
+    QmpManager,
+    connect_hint,
+    default_port,
+    parse_address,
+    slugify,
+)
 
 # --- pure helpers ---------------------------------------------------------
 
@@ -120,3 +126,65 @@ def test_manager_roundtrip_and_reconnect() -> None:
         await kill_server(server, writers)
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=15))
+
+
+# --- what a failed connect should say ---------------------------------
+#
+# The commonest failure used to produce a message ending in a bare colon:
+# asyncio.TimeoutError stringifies to "", and a timeout is exactly what a
+# second QMP client sees.
+
+
+def test_timeout_is_reported_as_another_client_holding_the_socket() -> None:
+    hint = connect_hint(asyncio.TimeoutError(), ("127.0.0.1", 4693))
+    assert "one QMP client at a time" in hint
+    assert "lsof -nP -iTCP:4693" in hint  # names the port to look at
+
+
+def test_refusal_is_reported_as_nothing_listening() -> None:
+    hint = connect_hint(
+        ConnectionRefusedError(61, "Connection refused"), ("127.0.0.1", 4693)
+    )
+    assert "nothing is listening" in hint
+    assert "check_vm" in hint
+
+
+def test_an_unexpected_error_still_names_itself() -> None:
+    # Never an empty explanation, whatever went wrong.
+    assert connect_hint(OSError("host is down"), ("127.0.0.1", 4693)) == (
+        "OSError: host is down"
+    )
+    assert connect_hint(OSError(), ("127.0.0.1", 4693)) == "OSError"
+
+
+def test_hint_works_for_a_unix_socket_address() -> None:
+    hint = connect_hint(asyncio.TimeoutError(), "/tmp/qmp.sock")
+    assert "/tmp/qmp.sock" in hint
+
+
+def test_refusal_is_recognised_through_the_library_wrapper() -> None:
+    # qemu.qmp does not re-raise ConnectionRefusedError; it wraps it, so
+    # the top-level type says nothing and the chain has to be walked.
+    wrapper = RuntimeError(
+        "Failed to establish connection: [Errno 61] "
+        "Connect call failed ('127.0.0.1', 4698)"
+    )
+    hint = connect_hint(wrapper, ("127.0.0.1", 4698))
+    assert "nothing is listening" in hint
+
+
+def test_refusal_is_recognised_from_a_chained_cause() -> None:
+    try:
+        try:
+            raise ConnectionRefusedError(61, "Connection refused")
+        except ConnectionRefusedError as inner:
+            raise RuntimeError("Failed to establish connection") from inner
+    except RuntimeError as outer:
+        assert "nothing is listening" in connect_hint(outer, ("127.0.0.1", 4698))
+
+
+def test_a_port_answering_but_not_speaking_qmp_is_called_out() -> None:
+    # Measured against a stand-in that accepted and closed at once.
+    wrapper = RuntimeError("Failed to establish session: EOFError")
+    hint = connect_hint(wrapper, ("127.0.0.1", 4699))
+    assert "not QEMU's QMP" in hint

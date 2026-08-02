@@ -131,6 +131,53 @@ def shape_drives(blocks: list[dict]) -> list[dict]:
     return drives
 
 
+def connect_hint(exc: BaseException, address: Address) -> str:
+    """Turn a failed connect into something worth reading.
+
+    The two failures mean opposite things and the exception text does not
+    say which — a timeout stringifies to nothing at all, so the commonest
+    problem used to surface as a message ending in a bare colon.
+
+    A **timeout** is the signature of a second client: QEMU accepts the
+    TCP connection and then never sends its greeting, because it serves
+    one QMP client at a time and someone else already has it. A
+    **refusal** means nothing is listening at all.
+    """
+    port = address[1] if isinstance(address, tuple) else address
+    # qemu.qmp wraps the real cause in its own ConnectError, so the useful
+    # exception is somewhere down the chain rather than the one raised.
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and not any(c is current for c in chain):
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    text = " ".join(str(c) for c in chain)
+
+    if any(isinstance(c, (asyncio.TimeoutError, TimeoutError)) for c in chain):
+        return (
+            f"connected but got no QMP greeting within {CONNECT_TIMEOUT:g}s. "
+            "QEMU serves one QMP client at a time and a second one is not "
+            "refused, it simply waits — so this usually means another "
+            "server or a debug script still holds the socket. Find it with "
+            f"`lsof -nP -iTCP:{port}` and stop it."
+        )
+    if any(isinstance(c, ConnectionRefusedError) for c in chain) or (
+        "Connect call failed" in text or "refused" in text.lower()
+    ):
+        return (
+            "nothing is listening there. The VM may be stopped, or it may "
+            "be missing the QMP argument — check_vm prints the exact line "
+            "to add to the VM's extra QEMU arguments."
+        )
+    if "EOFError" in text or isinstance(exc, EOFError):
+        return (
+            "the endpoint accepted the connection and then dropped it "
+            "without a QMP greeting. Something is listening on that port "
+            "that is not QEMU's QMP, or the VM shut down mid-handshake."
+        )
+    return f"{exc.__class__.__name__}: {exc}" if str(exc) else exc.__class__.__name__
+
+
 class QmpManager:
     """One persistent QMP connection per VM, with reconnect-once semantics."""
 
@@ -146,7 +193,8 @@ class QmpManager:
             await asyncio.wait_for(client.connect(address), CONNECT_TIMEOUT)
         except Exception as exc:
             raise QmpError(
-                f"cannot reach QMP for {vm!r} at {describe(address)}: {exc}"
+                f"cannot reach QMP for {vm!r} at {describe(address)}: "
+                + connect_hint(exc, address)
             ) from exc
         self._clients[vm] = client
         return client
