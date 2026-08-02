@@ -296,8 +296,18 @@ async def insert_media(
             library are staged into it automatically (instant APFS clone),
             because QEMU's sandbox can only read the library. Note: guest
             writes go to the staged copy, not the original file.
+
+            Images are identified by content. Staging a name the library
+            already holds compares digests: the same image is reused, a
+            different one is refused so you rename it. Size cannot make
+            that distinction — every 1.44 MB floppy is exactly 1474560
+            bytes, so a different Disk1.img used to be silently ignored
+            in favour of the one already staged.
         image_format: QEMU image format; "raw" (default) covers .img/.ima
             floppies and .iso images.
+
+    The reply carries the drive state, plus a `provenance` block naming
+    the staged image's digest and where it was staged from.
     """
     canonical = _resolve(vm)
     path = _resolve_image(image_path)
@@ -364,14 +374,26 @@ async def type_text(
         delay_ms: pause between characters. The default 60 is safe for
             DOS-era guests, which drop keys during disk I/O if flooded;
             raise it if characters go missing, lower it for bulk typing.
-        layout: "us" (default) or "us-intl". Pick "us-intl" when the guest
-            uses US-International — Windows 3.11 does whenever SYSTEM.INI
-            says `keyboard.dll=kbdusx.dll`. There the apostrophe, quote,
-            backtick, tilde and caret are dead keys: typed plainly they
-            emit nothing and swallow the character after them, so an
-            apostrophe is sent as accent-then-space. It also unlocks
-            accented characters, which the plain US layout cannot type at
-            all — "ç" goes out as acute then c.
+        layout: "us" (default), "us-intl" or "mac-option".
+
+            "us-intl" for guests on US-International — Windows 3.11 is,
+            whenever SYSTEM.INI says `keyboard.dll=kbdusx.dll`. There the
+            apostrophe, quote, backtick, tilde and caret are dead keys:
+            typed plainly they emit nothing and combine with whatever
+            follows, so "d'agua" arrives as "dágua". They are sent as
+            accent-then-space instead, and accented characters compose —
+            "ç" goes out as acute then c.
+
+            "mac-option" for Mac guests, where accents live on Option
+            chords that exist on the plain U.S. layout too: "á" is
+            option-e then a, "ç" is option-c on its own. ASCII
+            punctuation is untouched, so a Mac left on plain U.S. types
+            exact ASCII with "us" and reaches accents with this — the
+            better arrangement when you control the guest.
+
+            Letters and digits survive any Latin layout, which is what
+            makes a mismatch so easy to miss; run detect_layout on an x86
+            guest to find out rather than guess.
     """
     canonical = _resolve(vm)
     chords = keyboard.text_to_chords(text, layout=layout)
@@ -1061,11 +1083,21 @@ async def mouse_click(
     driven from the keyboard: see read_shortcuts and activate_menu, which
     are exact where pointing is approximate.
 
+    Refuses rather than clicks blind: if the cursor changes shape over
+    the target the loop loses track of it, and the position it would
+    report is the last one measured, not where the pointer is now.
+    A verified-but-inexact landing still clicks — a pixel out still hits
+    the button you aimed at.
+
     Args:
         vm: VM name or UUID.
         x, y: target in last-screenshot pixels.
         button: "left", "right" or "middle".
         double: double-click.
+        allow_unverified: click anyway when the position could not be
+            confirmed. Off by default; the open-loop fallback is
+            unaffected, since it never claimed to know where the cursor
+            was.
     """
     canonical = _resolve(vm)
     mouse.validate_button(button)
@@ -1143,11 +1175,27 @@ async def mouse_drag(
 
     The grab point is reached closed-loop and verified before the button
     goes down — that is the end that has to be exact, since it decides
-    what gets picked up. The travel itself is paced (old GUIs sample the
-    motion; instant jumps break drag detection) and the drop point is
-    measured afterwards when the cursor is still recognisable: dragging
-    often swaps the cursor for an outline or a ghost icon, and `drop` then
-    reports what could actually be verified.
+    what gets picked up, and an unverified grab is refused outright
+    (`allow_unverified` overrides). The travel is paced, because old GUIs
+    sample the motion and an instant jump breaks drag detection.
+
+    While the button is held the pointer is steered onto the drop point
+    on guests that leave the cursor recognisable — classic Mac OS drags a
+    window as an outline and keeps its arrow, and correcting there took a
+    measured 62 px error down to 1. Windows 3.11 swaps in a ghost icon
+    instead, leaving nothing to steer by, so its paced travel stands.
+
+    The drop is measured after the button comes up, when the ordinary
+    cursor is back, and reported as `drop.residual`.
+
+    Args:
+        vm: VM name or UUID.
+        x1, y1: grab point, in last-screenshot pixels.
+        x2, y2: drop point.
+        button: "left", "right" or "middle".
+        allow_unverified: grab anyway when the position could not be
+            confirmed. Off by default — pressing the button somewhere
+            unknown drags whatever happens to be under it.
     """
     canonical = _resolve(vm)
     mouse.validate_button(button)
