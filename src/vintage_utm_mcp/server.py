@@ -22,8 +22,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp import Image as McpImage
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Image as McpImage
 
 from vintage_utm_mcp import (
     keyboard,
@@ -35,7 +35,7 @@ from vintage_utm_mcp import (
     utmctl,
 )
 
-mcp = FastMCP("vintage-utm")
+mcp = MCPServer("vintage-utm")
 
 _qmp = qmp.QmpManager()
 

@@ -162,6 +162,16 @@ would report that as on target, because it is on the target it was given.
 - `stop_vm` defaults to `force` (power-button semantics): DOS-era
   guests do not answer ACPI requests. Stop at an idle `C:\>` prompt and
   mind SMARTDRV's write-behind cache.
+- **UTM's Retina Mode changes nothing the tools can see.** It is a host
+  display setting, so it redraws the window — the guest looks tiny on a
+  HiDPI screen — while the framebuffer QEMU hands to `screendump` stays
+  as it was. Measured with it on for both VMs: the MS-DOS text screen
+  came back **byte-identical** (same SHA-256 as the capture before it),
+  Windows 3.11 stayed 640x480 captured at 1280x960 and its `mouse_click`
+  repeated the earlier run exactly — 4 iterations, gain 2.0, residual
+  (0, 0), the Main group selected — and Mac OS 9 stayed 800x600 and
+  relearned the same 97-pixel sprite. The one real effect is that
+  toggling it restarts the VM, so the guest loses whatever was on screen.
 - Mouse motion works over a relative pointer. Movement is always paced —
   PS/2 carries at most 127 units per packet, so one huge delta leaves a
   backlog that drains for seconds and swallows everything sent meanwhile
@@ -425,15 +435,38 @@ would report that as on target, because it is on the target it was given.
    longer pretends a config knob can fix an unverifiable position — it
    reports `on_target: null` and says why. `~/.vintage-utm-mcp/qmp.toml`
    now carries only `[vms]` endpoints and the `[hotspot]` override
-17. Migrate to MCP SDK 2.x — 2.0.0 shipped 2026-07-28 and the dependency
-   is still pinned `<2`. It is a rename, not a removal
-   (`mcp.server.fastmcp.FastMCP` → `mcp.server.mcpserver.MCPServer`,
-   submodules keeping their structure, `@mcp.tool()` unchanged), so it
-   touches five lines in `server.py`; the constructor argument order,
-   transport arguments moving to `run()` and `get_context()` becoming
-   explicit parameters are the parts worth reading the migration guide
-   for. Last because it is the one item that changes no behaviour and
-   buys the guests nothing
+17. ~~Migrate to MCP SDK 2.x~~ — 2.0.0 shipped 2026-07-28 and the pin
+    was `<2`. In `server.py` it was the rename the plan predicted:
+    `mcp.server.fastmcp` → `mcp.server.mcpserver`, `FastMCP` →
+    `MCPServer`, three lines, with `@mcp.tool()` and `mcp.run()`
+    untouched and the constructor's first positional still `name` — the
+    argument order worth reading about only bites a caller passing a
+    second positional, which 1.x read as `instructions` and 2.x reads as
+    `title`. `get_context()` never appeared here at all. The tests were
+    the part the plan had wrong: 2.x returns a `CallToolResult` from
+    `call_tool` where 1.x returned a content sequence or a
+    `(content, structured)` tuple, and the wire models went snake_case —
+    `mimeType` → `mime_type`, `inputSchema` → `input_schema` — so the
+    image regression test asserted on an attribute that no longer exists
+    and had to be rewritten rather than renamed. It now checks
+    `is_error` first, because a serialization failure arrives as an error
+    result whose content is text, and failing on that reads better than
+    failing on a missing image. Verified against a running guest rather
+    than by inspection: 164 tests green, 18 tools listed over a real
+    stdio handshake (protocol 2025-11-25), `screenshot` returning a
+    10 KB PNG of the MS-DOS boot screen, `type_text` + `send_keys`
+    running `VER` and `read_text_screen` reading `MS-DOS Version 6.22`
+    back out of video memory, `detect_layout` reporting `us` with zero
+    mismatches, and a closed-loop `mouse_click` landing on Windows 3.11
+    with residual (0, 0) in 4 iterations. Mac OS 9.2.2 was checked as
+    well, because ppc exercises different paths: `screenshot` returned
+    the Finder at 800x600, `read_text_screen` and `detect_layout` both
+    refused with "text-mode reading is x86-only and this VM is 'ppc'"
+    rather than guessing, `mouse_locate` learned the same 97-pixel
+    sprite item 12 recorded, and two clicks landed with residual (0, 0)
+    in 21 and 22 iterations — the second, on empty desktop, visibly
+    deselecting the startup disk, which is what shows a click reached
+    the guest rather than merely arriving at the right coordinates
 
 ## Tests
 
